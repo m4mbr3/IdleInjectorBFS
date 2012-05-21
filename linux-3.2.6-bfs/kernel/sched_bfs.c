@@ -68,7 +68,12 @@
 #include <linux/ftrace.h>
 #include <linux/slab.h>
 #include <linux/init_task.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/string.h>
+#include <linux/list.h>
 
+#include <asm/uaccess.h>
 #include <asm/tlb.h>
 #include <asm/unistd.h>
 #include <asm/mutex.h>
@@ -128,6 +133,232 @@
 #define NS_TO_US(TIME)		((TIME) >> 10)
 
 #define RESCHED_US	(100) /* Reschedule if less than this many μs left */
+#define MOD_INC_USE_COUNT
+#define MOD_DEC_USE_COUNT
+/*
+ * Starting from here you can find the variables and costants of BFSIDLEINJ : system
+ */
+#define INJECTION_IDLE_CYCLE_EACH_TIME 2000 /*Default value for the global_injection */
+#define INJECTION_IDLE_CYCLE_PROC      5 /*Minimun value of max_load and global_rate to avoid deadlock of the system*/
+int is_init = 1; /*Flag to know if we are at init or not */
+int idle_cycles_offset = 0; /*Variable used as bound of global_rate. its value changes at runtime*/
+
+/*This are the data and the functions to manage the procfs files related to 
+ * parameters of the idle injection*/
+struct pid_list{
+	struct  list_head list; /*pointer to the list*/
+	int pid; /*pid or tid to check and limit*/
+	int max_load; /*every max_load we have an injection of idle instead my process or thread*/
+	int times; /*count how many times process with that pid is scheduled*/
+	char type; /*flag that says if check the pid or tid of the process scheduled*/
+};
+
+struct sched_parameters{
+	int global_rate; /*runtime value of idle injection at global level*/
+	struct pid_list *pidList; /*head of the pid and tid list */	 
+};
+ 
+static struct sched_parameters param; /* global variable to manage for our goal*/
+static spinlock_t lst_write_lock; /* synchronization variable*/
+static spinlock_t global_write_lock; /* synchronization variable */
+
+/*Function that allows people from userspace to read data
+ * from the kernel (read the global rate of injection)*/
+static int proc_read_idleGlobal(char *page, char **start,
+			off_t off, int count, 
+			int *eof, void *data){	
+			
+	int len;
+
+	spin_lock(&global_write_lock);
+	len = sprintf(page, "Global_rate = %d\n", param.global_rate);
+	spin_unlock(&global_write_lock);
+	return len;
+}
+
+/*Function that allows people from userspace to read data 
+ * from the kernel (read the set of pids to restrict)*/
+static int proc_read_idlePid(char *page, char **start,
+			off_t off, int count,
+			int *eof, void *data){
+	int len=0;
+	
+	len += sprintf(page,"%s\n\n", "Format Type: pid,max_load,times,type");
+	if(!list_empty(&param.pidList->list)){
+		struct pid_list *f;
+		spin_lock(&lst_write_lock);
+		list_for_each_entry_rcu(f, &param.pidList->list,list){
+			len += sprintf(page+len, "%d,%d,%d,%c\n",f->pid,f->max_load,f->times,f->type);
+		}
+		spin_unlock(&lst_write_lock);
+	}else{
+		len += sprintf(page+len, "%s\n", "No processes observed");
+	}
+	return len;
+}
+
+/*Function that allows people from userspace to write data
+ * to the kernel (write the global rate of injection)*/
+static int proc_write_idleGlobal(struct file *file,
+			const char *buffer,
+			unsigned long count,
+			void *data){
+	char *buffer_ker = kmalloc(sizeof(char)*count, GFP_ATOMIC);
+	memset(buffer_ker,0, sizeof(char) * count);
+	if(copy_from_user(buffer_ker,buffer,count)!=0){
+		printk("BFSIDLEINJ: copy_from_user() failed\n");
+		return -EFAULT;
+	}
+	spin_lock(&global_write_lock);
+	if((int)simple_strtol(buffer_ker, NULL, 10) >= 5)
+		param.global_rate = (int) simple_strtol(buffer_ker, NULL, 10);
+	spin_unlock(&global_write_lock);
+	printk("BFSIDLEINJ: idleGlobal has been written to %d\n",param.global_rate);
+	kfree(buffer_ker);
+	return count;
+}
+
+/*Function that allows people from userspace to write data
+ * to the kernel (write the set of pids to restrict) */
+static int proc_write_idlePid(struct file *file,
+			const char *buffer,
+			unsigned long count,
+			void *data){
+	struct pid_list *pid_new, *f;
+	char *buffer_ker, *buffer_ker_copy;
+	char *temp_pid;
+	char *temp_load;
+	char *temp_type;
+	f=NULL;
+	do{
+		pid_new = kmalloc(sizeof(struct pid_list), GFP_ATOMIC);
+		if (pid_new == NULL) printk("BFSIDLEINJ: pid_new->poiter creation failed\n");
+	}while(pid_new == NULL);
+	do{
+		buffer_ker = kmalloc(sizeof(char)*count, GFP_ATOMIC);
+		if(buffer_ker == NULL) printk("BFSIDLEINJ: buffer_ker->pointer creation failed\n");
+	}while(buffer_ker==NULL);
+	if(copy_from_user(buffer_ker, buffer, count) !=0){
+		printk("BFSIDLEINJ: copy_from_user() failed\n");
+		return -EFAULT;
+	}
+	buffer_ker_copy =  buffer_ker;
+	temp_pid = strsep(&buffer_ker,",");
+	temp_load = strsep(&buffer_ker,",");
+	temp_type = strsep(&buffer_ker,",");
+	pid_new->pid = (int) simple_strtol(temp_pid,NULL,10);
+	pid_new->max_load = (int) simple_strtol(temp_load, NULL,10);
+        pid_new->times = 0;
+	if(temp_type != NULL)
+		pid_new->type = *temp_type;
+	else
+		pid_new->type = 't';
+	if(pid_new->max_load < INJECTION_IDLE_CYCLE_PROC){
+		printk("BFSIDLEINJ: Max_load inserted is not valid!!! it must be >= %d\n",INJECTION_IDLE_CYCLE_PROC);	
+		kfree(pid_new);
+		goto free;
+	}
+	
+		if((pid_new->type != 't') && (pid_new->type != 'p')){
+			printk("BFSIDLEINJ: The type inserted is not valid!!! it must be either 't' or 'p'\n");
+			kfree(pid_new);
+			goto free;
+		}
+
+	if(list_empty(&param.pidList->list)){	
+		printk("BFSIDLEINJ: Case empty list\n");
+		if(pid_new->pid > 0 ){
+			spin_lock(&lst_write_lock);
+			list_add_tail_rcu(&pid_new->list, &param.pidList->list);
+			spin_unlock(&lst_write_lock);
+			printk("BFSIDLEINJ: First Element Added\n");
+			goto free;
+		}
+		else{ 
+			printk("BFSIDLEINJ: Negative pid doesn't mean anything if there's no element in the list\n");
+			kfree(pid_new);
+			goto free;
+		}
+	}
+	else {
+		printk("BFSIDLEINJ: Case one or more elements in the list\n");
+		list_for_each_entry_rcu(f, &param.pidList->list,list){
+			if(f->pid == pid_new->pid){
+				spin_lock(&lst_write_lock);
+				list_replace_rcu(&f->list, &pid_new->list);
+				spin_unlock(&lst_write_lock);
+				printk("BFSIDLEINJ: Max_load updated to %d of pid = %d\n", pid_new->max_load,pid_new->pid);
+				kfree(f);
+				goto free;
+			}
+			if(f->pid == (-1* pid_new->pid)){
+				spin_lock(&lst_write_lock);
+				list_del_rcu(&f->list);
+				spin_unlock(&lst_write_lock);
+				kfree(f);
+				printk("BFSIDLEINJ: Element removed\n");
+				goto free;
+			}
+		}
+	}
+	if(pid_new->pid >0){
+		spin_lock(&lst_write_lock);
+	 	list_add_tail_rcu(&pid_new->list, &param.pidList->list);
+		spin_unlock(&lst_write_lock);
+		printk("BFSIDLEINJ: Added one element at the end of the list\n");
+		goto free;
+	}
+	else{
+		kfree(pid_new);
+	}
+
+free:	kfree(buffer_ker_copy);
+
+	return count;
+}
+
+static struct proc_dir_entry *schedidle_file_global, *schedidle_file_pid, *schedidle_dir;
+
+/*Function that create the proc file and initialiaze all the variables in  a consistent way
+ */
+static void set_everything_idlepar(void)
+{
+	param.global_rate = INJECTION_IDLE_CYCLE_EACH_TIME;
+	param.pidList = kmalloc(sizeof(struct pid_list), GFP_ATOMIC);
+	INIT_LIST_HEAD(&param.pidList->list);
+	//creation of the directory where put the files
+	schedidle_dir = proc_mkdir("schedidle",NULL);
+	if(schedidle_dir == NULL){
+		printk("BFSIDLEINJ: /proc/schedidle hasn't been created\n");
+		goto end;
+	}
+	schedidle_dir->uid = 0;
+	schedidle_dir->gid = 0;
+	//creation of the global param file inside /proc/schedidle
+	schedidle_file_global = create_proc_entry("sched_global", 0644, schedidle_dir);
+	if(schedidle_file_global == NULL){
+		printk("BFSIDLEINJ: /proc/schedidle/sched_global file hasn't been created\n");
+		goto end;
+	}
+	schedidle_file_global->uid = 0;
+	schedidle_file_global->gid = 0;
+	schedidle_file_global->data = &param;
+	schedidle_file_global->read_proc = proc_read_idleGlobal;
+	schedidle_file_global->write_proc = proc_write_idleGlobal;
+	//creation of the Pid file inside /proc/schedidle
+	schedidle_file_pid = create_proc_entry("sched_pid", 0644, schedidle_dir);
+	if(schedidle_file_pid == NULL){
+		printk("BFSIDLEINJ: /proc/schedidle/sched_pid file hasn't been created\n");
+		goto end;
+	}
+	schedidle_file_pid->uid = 0;
+	schedidle_file_pid->gid = 0;
+	schedidle_file_pid->data = param.pidList;
+	schedidle_file_pid->read_proc = proc_read_idlePid;
+	schedidle_file_pid->write_proc = proc_write_idlePid;
+  end:  printk("BFSIDLEINJ: Procfs Schedidle initialization Completed\n");
+}
+/*End of the definition procfs parameters managing */
 
 /*
  * This is the time all tasks within the same priority round robin.
@@ -1119,7 +1350,7 @@ swap_sticky(struct rq *rq, int cpu, struct task_struct *p)
 
 static inline void unstick_task(struct rq *rq, struct task_struct *p)
 {
-}
+
 #endif
 
 /*
@@ -2985,7 +3216,7 @@ retry:
 		list_for_each_entry(p, queue, run_list) {
 			/* Make sure cpu affinity is ok */
 			if (needs_other_cpu(p, cpu))
-				continue;
+				continue;	
 			edt = p;
 			goto out_take;
 		}
@@ -3020,7 +3251,7 @@ retry:
 		 */
 		if (edt == idle ||
 		    deadline_before(dl, earliest_deadline)) {
-			earliest_deadline = dl;
+			earliest_deadline = dl;	
 			edt = p;
 		}
 	}
@@ -3028,7 +3259,39 @@ retry:
 		if (++idx < PRIO_LIMIT)
 			goto retry;
 		goto out;
-	}
+	}else{
+		/*here is the point where we check if the next scheduled process has to be changed with the idle process*/
+		spin_lock(&lst_write_lock);
+		if(!list_empty(&param.pidList->list)){
+			struct pid_list *f;
+				list_for_each_entry_rcu(f, &param.pidList->list,list){
+					if(f->type == 't'){	
+						if (edt->pid == f->pid){
+							f->times++;
+							if(f->times == f->max_load){
+								f->times = 0;
+								edt = idle;
+								spin_unlock(&lst_write_lock);
+								goto out;	
+							}
+						}			
+					}
+					else if(f->type == 'p'){
+						if(edt->tgid == f->pid){
+							f->times++;
+							if(f->times == f->max_load){
+								f->times = 0;
+								edt = idle;
+								spin_unlock(&lst_write_lock);
+								goto out;
+							}
+						}		
+					}
+				}
+			}
+				spin_unlock(&lst_write_lock);
+		}
+
 out_take:
 	take_task(cpu, edt);
 out:
@@ -3108,7 +3371,7 @@ asmlinkage void __sched schedule(void)
 	unsigned long *switch_count;
 	int deactivate, cpu;
 	struct rq *rq;
-
+	int injection_value;
 need_resched:
 	preempt_disable();
 
@@ -3124,6 +3387,13 @@ need_resched:
 	grq_lock_irq();
 
 	switch_count = &prev->nivcsw;
+
+
+
+	idle_cycles_offset++;
+
+
+
 	if (prev->state && !(preempt_count() & PREEMPT_ACTIVE)) {
 		if (unlikely(signal_pending_state(prev->state, prev))) {
 			prev->state = TASK_RUNNING;
@@ -3196,24 +3466,41 @@ need_resched:
 		}
 		return_task(prev, deactivate);
 	}
-
-	if (unlikely(!queued_notrunning())) {
+	if(is_init == 1){
+		injection_value = param.global_rate;	
+		is_init=0;
+		set_everything_idlepar();	
+	}
+	else{
+		injection_value = param.global_rate;
+	}
+			
+	if (unlikely(!queued_notrunning()) || idle_cycles_offset == injection_value ){ 
 		/*
 		 * This CPU is now truly idle as opposed to when idle is
 		 * scheduled as a high priority task in its own right.
 		 */
+			
+		idle_cycles_offset =0;
 		next = idle;
 		schedstat_inc(rq, sched_goidle);
 		set_cpuidle_map(cpu);
 	} else {
-		next = earliest_deadline_task(rq, cpu, idle);
-		if (likely(next->prio != PRIO_LIMIT))
-			clear_cpuidle_map(cpu);
-		else
-			set_cpuidle_map(cpu);
-	}
+			next = earliest_deadline_task(rq, cpu, idle);
+			if (next != idle){
+				if (likely(next->prio != PRIO_LIMIT))
+					clear_cpuidle_map(cpu);
+				else
+					set_cpuidle_map(cpu);
+			}		
+			else{
+				schedstat_inc(rq,sched_goidle);
+				set_cpuidle_map(cpu);
+			}
+		}
 
 	if (likely(prev != next)) {
+		
 		/*
 		 * Don't stick tasks when a real time task is going to run as
 		 * they may literally get stuck.
@@ -3429,8 +3716,7 @@ EXPORT_SYMBOL_GPL(__wake_up_locked_key);
  * be migrated to another CPU - ie. the two threads are 'synchronised'
  * with each other. This can prevent needless bouncing between CPUs.
  *
- * On UP it can prevent extra preemption.
- *
+
  * It may be assumed that this function implies a write memory barrier before
  * changing the task state if and only if any tasks are woken up.
  */
