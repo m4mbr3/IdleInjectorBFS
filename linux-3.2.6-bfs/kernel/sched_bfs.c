@@ -3251,7 +3251,7 @@ retry:
 		 */
 		if (edt == idle ||
 		    deadline_before(dl, earliest_deadline)) {
-			earliest_deadline = dl;	
+			earliest_deadline = dl;
 			edt = p;
 		}
 	}
@@ -3265,27 +3265,15 @@ retry:
 		if(!list_empty(&param.pidList->list)){
 			struct pid_list *f;
 				list_for_each_entry_rcu(f, &param.pidList->list,list){
-					if(f->type == 't'){	
-						if (edt->pid == f->pid){
+					if(edt->tgid == f->pid && f->type == 'p' ||
+					   edt->pid == f->pid && f->type == 't') {
 							f->times++;
-							if(f->times == f->max_load){
-								f->times = 0;
-								edt = idle;
-								spin_unlock(&lst_write_lock);
-								goto out;	
-							}
-						}			
-					}
-					else if(f->type == 'p'){
-						if(edt->tgid == f->pid){
-							f->times++;
-							if(f->times == f->max_load){
+							if(f->times == f->max_load) {
 								f->times = 0;
 								edt = idle;
 								spin_unlock(&lst_write_lock);
 								goto out;
 							}
-						}		
 					}
 				}
 			}
