@@ -1,0 +1,2742 @@
+diff --git a/.gitignore b/.gitignore
+index 57af07c..f9d0acc 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -83,4 +83,5 @@ GTAGS
+ 
+ *.orig
+ *~
++*.vim
+ \#*#
+diff --git a/fs/proc/Makefile b/fs/proc/Makefile
+index c1c7293..1331ba2 100644
+--- a/fs/proc/Makefile
++++ b/fs/proc/Makefile
+@@ -28,3 +28,4 @@ proc-$(CONFIG_PROC_VMCORE)	+= vmcore.o
+ proc-$(CONFIG_PROC_DEVICETREE)	+= proc_devtree.o
+ proc-$(CONFIG_PRINTK)	+= kmsg.o
+ proc-$(CONFIG_PROC_PAGE_MONITOR)	+= page.o
++proc-$(CONFIG_HRM)	+= hrm.o
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 1ace83d..09a85ee 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -88,6 +88,10 @@
+ #endif
+ #include "internal.h"
+ 
++#ifdef CONFIG_HRM
++#include <linux/hrm.h>
++#endif
++
+ /* NOTE:
+  *	Implementing inode permission operations in /proc is almost
+  *	certainly an error.  Permission checks need to happen during
+@@ -3038,6 +3042,42 @@ out_no_task:
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_HRM
++static const struct file_operations proc_hrm_producer_group_ops = {
++	.llseek = generic_file_llseek,
++	.write = hrm_producer_group_write,
++};
++
++static const struct file_operations proc_hrm_consumer_group_ops = {
++	.llseek = generic_file_llseek,
++	.write = hrm_consumer_group_write,
++};
++
++static const struct file_operations proc_hrm_producer_counter_ops = {
++	.llseek = generic_file_llseek,
++	.read = hrm_producer_counter_read,
++	.mmap = hrm_producer_counter_mmap,
++};
++
++static const struct file_operations proc_hrm_consumer_counter_ops = {
++	.llseek = generic_file_llseek,
++	.read = hrm_consumer_counter_read,
++	.mmap = hrm_consumer_counter_mmap,
++};
++
++static const struct file_operations proc_hrm_producer_measures_goal_ops = {
++	.llseek = generic_file_llseek,
++	.read = hrm_producer_measures_goal_read,
++	.mmap = hrm_producer_measures_goal_mmap,
++};
++
++static const struct file_operations proc_hrm_consumer_measures_goal_ops = {
++	.llseek = generic_file_llseek,
++	.read = hrm_consumer_measures_goal_read,
++	.mmap = hrm_consumer_measures_goal_mmap,
++};
++#endif
++
+ /*
+  * Tasks
+  */
+@@ -3112,6 +3152,14 @@ static const struct pid_entry tid_base_stuff[] = {
+ #ifdef CONFIG_HARDWALL
+ 	INF("hardwall",   S_IRUGO, proc_pid_hardwall),
+ #endif
++#ifdef CONFIG_HRM
++	REG("hrm_producer_group", S_IRUSR | S_IWUSR, proc_hrm_producer_group_ops),
++	REG("hrm_consumer_group", S_IRUSR | S_IWUSR, proc_hrm_consumer_group_ops),
++	REG("hrm_producer_counter", S_IRUSR | S_IWUSR, proc_hrm_producer_counter_ops),
++	REG("hrm_consumer_counter", S_IRUSR | S_IWUSR, proc_hrm_consumer_counter_ops),
++	REG("hrm_producer_measures_goal", S_IRUSR | S_IWUSR, proc_hrm_producer_measures_goal_ops),
++	REG("hrm_consumer_measures_goal", S_IRUSR | S_IWUSR, proc_hrm_consumer_measures_goal_ops)
++#endif
+ };
+ 
+ static int proc_tid_base_readdir(struct file * filp,
+diff --git a/fs/proc/hrm.c b/fs/proc/hrm.c
+new file mode 100644
+index 0000000..62b72e4
+--- /dev/null
++++ b/fs/proc/hrm.c
+@@ -0,0 +1,611 @@
++#include <asm/io.h>
++#include <asm/uaccess.h>
++#include <linux/hrm.h>
++#include <linux/init.h>
++#include <linux/proc_fs.h>
++#include <linux/seq_file.h>
++#include <linux/sched.h>
++
++#include "internal.h"
++
++ssize_t hrm_producer_group_write(struct file *file, const char __user *buf, size_t size, loff_t *off)
++{
++	ssize_t retval;
++	struct task_struct *task;
++	char kbuf[1024];
++	int gid;
++
++	task = get_proc_task(file->f_dentry->d_inode);
++
++	if (task != current) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not valid\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_valid;
++	}
++
++	memset(kbuf, 0, sizeof(char) * 1024);
++	if (copy_from_user(kbuf, buf, size) != 0) {
++		printk(KERN_ERR __FILE__ " @ %d copy_from_user() failed\n", __LINE__);
++		retval = -EFAULT;
++		goto failure_copy_from_user;
++	}
++
++	gid = (int) simple_strtol(kbuf, NULL, 10);
++	if (gid > 0) {
++		retval = hrm_add_producer_task_to_group(task, gid);
++		if (retval < 0) {
++			printk(KERN_ERR __FILE__ " @ %d hrm_add_producer_task_to_group() failed\n", __LINE__);
++			goto failure_add_producer_task_to_group;
++		}
++	} else if (gid < 0) {
++		gid = -gid;
++		retval = hrm_delete_producer_task_from_group(task, gid);
++		if (retval < 0) {
++			printk(KERN_ERR __FILE__ " @ %d hrm_delete_producer_task_from_group() failed\n", __LINE__);
++			goto failure_delete_producer_task_from_group;
++		}
++	} else {
++		printk(KERN_ERR __FILE__ " @ %d group 0 not valid\n", __LINE__);
++		retval = -EINVAL;
++		goto failure_group_not_valid;
++	}
++
++	retval = (ssize_t) size;
++
++failure_group_not_valid:
++failure_add_producer_task_to_group:
++failure_delete_producer_task_from_group:
++failure_copy_from_user:
++failure_task_not_valid:
++	put_task_struct(task);
++
++	return retval;
++}
++
++ssize_t hrm_consumer_group_write(struct file *file, const char __user *buf, size_t size, loff_t *off)
++{
++	ssize_t retval;
++	struct task_struct *task;
++	char kbuf[1024];
++	int gid;
++
++	task = get_proc_task(file->f_dentry->d_inode);
++
++	if (task != current) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not valid\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_valid;
++	}
++
++	memset(kbuf, 0, sizeof(char) * 1024);
++	if (copy_from_user(kbuf, buf, size) != 0) {
++		printk(KERN_ERR __FILE__ " @ %d copy_from_user() failed\n", __LINE__);
++		retval = -EFAULT;
++		goto failure_copy_from_user;
++	}
++
++	gid = (int) simple_strtol(kbuf, NULL, 10);
++	if (gid > 0) {
++		retval = hrm_add_consumer_task_to_group(task, gid);
++		if (retval < 0) {
++			printk(KERN_ERR __FILE__ " @ %d hrm_add_consumer_task_to_group() failed\n", __LINE__);
++			goto failure_add_consumer_task_to_group;
++		}
++	} else if (gid < 0) {
++		gid = -gid;
++		retval = hrm_delete_consumer_task_from_group(task, gid);
++		if (retval < 0) {
++			printk(KERN_ERR __FILE__ " @ %d hrm_delete_consumer_task_from_group() failed\n", __LINE__);
++			goto failure_delete_consumer_task_from_group;
++		}
++	} else {
++		printk(KERN_ERR __FILE__ " @ %d group 0 not valid\n", __LINE__);
++		retval = -EINVAL;
++		goto failure_group_not_valid;
++	}
++
++	retval = (ssize_t) size;
++
++failure_group_not_valid:
++failure_add_consumer_task_to_group:
++failure_delete_consumer_task_from_group:
++failure_copy_from_user:
++failure_task_not_valid:
++	put_task_struct(task);
++
++	return retval;
++}
++
++ssize_t hrm_producer_counter_read(struct file *file, char __user *buf, size_t size, loff_t *off)
++{
++	ssize_t retval;
++	struct task_struct *task;
++	struct hrm_producer *producer;
++	char kbuf[1024];
++	int ksize;
++
++	task = get_proc_task(file->f_dentry->d_inode);
++
++	if (task != current) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not valid\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_valid;
++	}
++
++	if (!hrm_producer_task_enabled(task)) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not enabled\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_enabled;
++	}
++
++	producer = list_first_entry(&task->hrm_producers, struct hrm_producer, task_link);
++	ksize = snprintf(kbuf, 1024, "%lu", producer->counter_user_address);
++	retval = simple_read_from_buffer(buf, size, off, kbuf, ksize);
++
++failure_task_not_enabled:
++failure_task_not_valid:
++	put_task_struct(task);
++
++	return retval;
++}
++
++int hrm_producer_counter_mmap(struct file* file, struct vm_area_struct *vma)
++{
++	int retval = 0;
++	struct task_struct *task;
++	struct hrm_producer *producer;
++	struct hrm_memory *counters;
++	unsigned long members_lock_flags;
++	unsigned long user_address;
++	long size;
++
++	task = get_proc_task(file->f_dentry->d_inode);
++
++	if (task != current) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not valid\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_valid;
++	}
++
++	if (!hrm_producer_task_enabled(task)) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not enabled\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_enabled;
++	}
++
++	producer = list_first_entry(&task->hrm_producers, struct hrm_producer, task_link);
++	write_lock_irqsave(&producer->group->members_lock, members_lock_flags);
++	counters = &producer->group->counters;
++	user_address = __hrm_find_group_memory_map(task, counters);
++	if (user_address != 0) {
++		retval = __hrm_get_group_memory_map(task, counters);
++		if (retval < 0) {
++			printk(KERN_ERR __FILE__ " @ %d __hrm_get_group_memory_map() failed\n", __LINE__);
++			goto failure_get_group_memory_map;
++		}
++		goto exit;
++	}
++
++	size = vma->vm_end - vma->vm_start;
++	if (size != counters->size) {
++		printk(KERN_ERR __FILE__ " @ %d size not valid\n", __LINE__);
++		retval = -EINVAL;
++		goto failure_size;
++	}
++	retval = remap_pfn_range(vma, vma->vm_start, virt_to_phys((void *) counters->kernel_address) >> PAGE_SHIFT, size, vma->vm_page_prot);
++	if (retval < 0) {
++		printk(KERN_ERR __FILE__ " @ %d remap_pfn_range() failed\n", __LINE__);
++		goto failure_remap_pfn_range;
++	}
++	user_address = vma->vm_start;
++	retval = __hrm_add_group_memory_map(task, counters, user_address);
++	if (retval < 0) {
++		printk(KERN_ERR __FILE__ " @ %d __hrm_add_group_counters_map() failed\n", __LINE__);
++		goto failure_add_group_memory_map;
++	}
++
++exit:
++	producer->counter_user_address = HRM_COUNTER_ADDR(user_address,
++							producer->counter_index);
++failure_add_group_memory_map:
++failure_remap_pfn_range:
++failure_size:
++failure_get_group_memory_map:
++	write_unlock_irqrestore(&producer->group->members_lock, members_lock_flags);
++failure_task_not_enabled:
++failure_task_not_valid:
++	put_task_struct(task);
++
++	return retval;
++}
++
++ssize_t hrm_consumer_counter_read(struct file *file, char __user *buf, size_t size, loff_t *off)
++{
++	ssize_t retval;
++	struct task_struct *task;
++	struct hrm_consumer *consumer;
++	char kbuf[1024];
++	int ksize;
++
++	task = get_proc_task(file->f_dentry->d_inode);
++
++	if (task != current) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not valid\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_valid;
++	}
++
++	if (!hrm_consumer_task_enabled(task)) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not enabled\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_enabled;
++	}
++
++	consumer = list_first_entry(&task->hrm_consumers, struct hrm_consumer, task_link);
++	ksize = snprintf(kbuf, 1024, "%lu", consumer->counter_user_address);
++	retval = simple_read_from_buffer(buf, size, off, kbuf, ksize);
++
++failure_task_not_enabled:
++failure_task_not_valid:
++	put_task_struct(task);
++
++	return retval;
++}
++
++int hrm_consumer_counter_mmap(struct file* file, struct vm_area_struct *vma)
++{
++	int retval = 0;
++	struct task_struct *task;
++	struct hrm_consumer *consumer;
++	struct hrm_memory *counters;
++	unsigned long members_lock_flags;
++	unsigned long user_address;
++	long size;
++
++	task = get_proc_task(file->f_dentry->d_inode);
++
++	if (task != current) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not valid\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_valid;
++	}
++
++	if (!hrm_consumer_task_enabled(task)) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not enabled\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_enabled;
++	}
++
++	consumer = list_first_entry(&task->hrm_consumers, struct hrm_consumer, task_link);
++	write_lock_irqsave(&consumer->group->members_lock, members_lock_flags);
++	counters = &consumer->group->counters;
++	user_address = __hrm_find_group_memory_map(task, counters);
++	if (user_address != 0) {
++		retval = __hrm_get_group_memory_map(task, counters);
++		if (retval < 0) {
++			printk(KERN_ERR __FILE__ " @ %d __hrm_get_group_memory_map() failed\n", __LINE__);
++			goto failure_get_group_memory_map;
++		}
++		goto exit;
++	}
++
++	size = vma->vm_end - vma->vm_start;
++	if (size != counters->size) {
++		printk(KERN_ERR __FILE__ " @ %d size not valid\n", __LINE__);
++		retval = -EINVAL;
++		goto failure_size;
++	}
++	retval = remap_pfn_range(vma, vma->vm_start, virt_to_phys((void *) counters->kernel_address) >> PAGE_SHIFT, size, vma->vm_page_prot);
++	if (retval < 0) {
++		printk(KERN_ERR __FILE__ " @ %d remap_pfn_range() failed\n", __LINE__);
++		goto failure_remap_pfn_range;
++	}
++	user_address = vma->vm_start;
++	retval = __hrm_add_group_memory_map(task, counters, user_address);
++	if (retval < 0) {
++		printk(KERN_ERR __FILE__ " @ %d __hrm_add_group_counters_map() failed\n", __LINE__);
++		goto failure_add_group_memory_map;
++	}
++
++exit:
++	consumer->counter_user_address = HRM_COUNTERS_ADDR(user_address);
++failure_add_group_memory_map:
++failure_remap_pfn_range:
++failure_size:
++failure_get_group_memory_map:
++	write_unlock_irqrestore(&consumer->group->members_lock, members_lock_flags);
++failure_task_not_enabled:
++failure_task_not_valid:
++	put_task_struct(task);
++
++	return retval;
++}
++
++ssize_t hrm_producer_measures_goal_read(struct file *file, char __user *buf, size_t size, loff_t *off)
++{
++	ssize_t retval;
++	struct task_struct *task;
++	struct hrm_producer *producer;
++	char kbuf[1024];
++	int ksize;
++
++	task = get_proc_task(file->f_dentry->d_inode);
++
++	if (task != current) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not valid\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_valid;
++	}
++
++	if (!hrm_producer_task_enabled(task)) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not enabled\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_enabled;
++	}
++
++	producer = list_first_entry(&task->hrm_producers, struct hrm_producer, task_link);
++	ksize = snprintf(kbuf, 1024, "%lu %lu", producer->measures_user_address, producer->goal_user_address);
++	retval = simple_read_from_buffer(buf, size, off, kbuf, ksize);
++
++failure_task_not_enabled:
++failure_task_not_valid:
++	put_task_struct(task);
++
++	return retval;
++}
++
++int hrm_producer_measures_goal_mmap(struct file* file, struct vm_area_struct *vma)
++{
++	int retval = 0;
++	struct task_struct *task;
++	struct hrm_producer *producer;
++	struct hrm_memory *measures_goal;
++	unsigned long members_lock_flags;
++	unsigned long user_address;
++	long size;
++
++	task = get_proc_task(file->f_dentry->d_inode);
++
++	if (task != current) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not valid\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_valid;
++	}
++
++	if (!hrm_producer_task_enabled(task)) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not enabled\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_enabled;
++	}
++
++	producer = list_first_entry(&task->hrm_producers, struct hrm_producer, task_link);
++	write_lock_irqsave(&producer->group->members_lock, members_lock_flags);
++	measures_goal = &producer->group->measures_goal;
++	user_address = __hrm_find_group_memory_map(task, measures_goal);
++	if (user_address != 0) {
++		retval = __hrm_get_group_memory_map(task, measures_goal);
++		if (retval < 0) {
++			printk(KERN_ERR __FILE__ " @ %d __hrm_get_group_memory_map() failed\n", __LINE__);
++			goto failure_get_group_memory_map;
++		}
++		goto exit;
++	}
++
++	size = vma->vm_end - vma->vm_start;
++	if (size != producer->group->measures_goal.size) {
++		printk(KERN_ERR __FILE__ " @ %d size not valid\n", __LINE__);
++		retval = -EINVAL;
++		goto failure_size;
++	}
++	retval = remap_pfn_range(vma, vma->vm_start, virt_to_phys((void *) producer->group->measures_goal.kernel_address) >> PAGE_SHIFT, size, vma->vm_page_prot);
++	if (retval < 0) {
++		printk(KERN_ERR __FILE__ " @ %d remap_pfn_range() failed\n", __LINE__);
++		goto failure_remap_pfn_range;
++	}
++	user_address = vma->vm_start;
++	retval = __hrm_add_group_memory_map(task, measures_goal, user_address);
++	if (retval < 0) {
++		printk(KERN_ERR __FILE__ " @ %d __hrm_add_group_counters_map() failed\n", __LINE__);
++		goto failure_add_group_memory_map;
++	}
++
++exit:
++	producer->measures_user_address = HRM_MEASURES_ADDR(user_address);
++	producer->goal_user_address = HRM_GOAL_ADDR(user_address);
++failure_add_group_memory_map:
++failure_remap_pfn_range:
++failure_size:
++failure_get_group_memory_map:
++	write_unlock_irqrestore(&producer->group->members_lock, members_lock_flags);
++failure_task_not_enabled:
++failure_task_not_valid:
++	put_task_struct(task);
++
++	return retval;
++}
++
++ssize_t hrm_consumer_measures_goal_read(struct file *file, char __user *buf, size_t size, loff_t *off)
++{
++	ssize_t retval;
++	struct task_struct *task;
++	struct hrm_consumer *consumer;
++	char kbuf[1024];
++	int ksize;
++
++	task = get_proc_task(file->f_dentry->d_inode);
++
++	if (task != current) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not valid\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_valid;
++	}
++
++	if (!hrm_consumer_task_enabled(task)) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not enabled\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_enabled;
++	}
++
++	consumer = list_first_entry(&task->hrm_consumers, struct hrm_consumer, task_link);
++	ksize = snprintf(kbuf, 1024, "%lu %lu", consumer->measures_user_address, consumer->goal_user_address);
++	retval = simple_read_from_buffer(buf, size, off, kbuf, ksize);
++
++failure_task_not_enabled:
++failure_task_not_valid:
++	put_task_struct(task);
++
++	return retval;
++}
++
++int hrm_consumer_measures_goal_mmap(struct file* file, struct vm_area_struct *vma)
++{
++	int retval = 0;
++	struct task_struct *task;
++	struct hrm_consumer *consumer;
++	struct hrm_memory *measures_goal;
++	unsigned long members_lock_flags;
++	unsigned long user_address;
++	long size;
++
++	task = get_proc_task(file->f_dentry->d_inode);
++
++	if (task != current) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not valid\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_valid;
++	}
++
++	if (!hrm_consumer_task_enabled(task)) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not enabled\n", __LINE__, (int) task->pid);
++		retval = -EPERM;
++		goto failure_task_not_enabled;
++	}
++
++	consumer = list_first_entry(&task->hrm_consumers, struct hrm_consumer, task_link);
++	write_lock_irqsave(&consumer->group->members_lock, members_lock_flags);
++	measures_goal = &consumer->group->measures_goal;
++	user_address = __hrm_find_group_memory_map(task, measures_goal);
++	if (user_address != 0) {
++		retval = __hrm_get_group_memory_map(task, measures_goal);
++		if (retval < 0) {
++			printk(KERN_ERR __FILE__ " @ %d __hrm_get_group_memory_map() failed\n", __LINE__);
++			goto failure_get_group_memory_map;
++		}
++		goto exit;
++	}
++
++	size = vma->vm_end - vma->vm_start;
++	if (size != measures_goal->size) {
++		printk(KERN_ERR __FILE__ " @ %d size not valid\n", __LINE__);
++		retval = -EINVAL;
++		goto failure_size;
++	}
++	retval = remap_pfn_range(vma, vma->vm_start, virt_to_phys((void *) measures_goal->kernel_address) >> PAGE_SHIFT, size, vma->vm_page_prot);
++	if (retval < 0) {
++		printk(KERN_ERR __FILE__ " @ %d remap_pfn_range() failed\n", __LINE__);
++		goto failure_remap_pfn_range;
++	}
++	user_address = vma->vm_start;
++	retval = __hrm_add_group_memory_map(task, measures_goal, user_address);
++	if (retval < 0) {
++		printk(KERN_ERR __FILE__ " @ %d __hrm_add_group_counters_map() failed\n", __LINE__);
++		goto failure_add_group_memory_map;
++	}
++
++exit:
++	consumer->measures_user_address = HRM_MEASURES_ADDR(user_address);
++	consumer->goal_user_address = HRM_GOAL_ADDR(user_address);
++failure_add_group_memory_map:
++failure_remap_pfn_range:
++failure_size:
++failure_get_group_memory_map:
++	write_unlock_irqrestore(&consumer->group->members_lock, members_lock_flags);
++failure_task_not_enabled:
++failure_task_not_valid:
++	put_task_struct(task);
++
++	return retval;
++}
++
++static int hrm_show(struct seq_file *seq_file, void *v)
++{
++	struct hrm_group *group;
++	unsigned long members_lock_flags;
++	struct hrm_producer *producer;
++	struct hrm_measures *measures;
++	struct hrm_goal *goal;
++	int groups_number = 0;
++	int i;
++	struct timespec ts;
++	u64 min, max, hr;
++	size_t scope;
++
++	spin_lock(&hrm_groups_lock);
++
++	getrawmonotonic(&ts);
++
++	list_for_each_entry(group, &hrm_groups, link) {
++		groups_number++;
++	}
++	seq_printf(seq_file, "%d monitored groups found:", groups_number);
++	if (!groups_number)
++		seq_printf(seq_file, "\n");
++
++	list_for_each_entry(group, &hrm_groups, link) {
++		seq_printf(seq_file, "\n\ngid: %d\ntids:", group->gid);
++		read_lock_irqsave(&group->members_lock, members_lock_flags);
++		list_for_each_entry (producer, &group->producers, group_link) {
++			seq_printf(seq_file, " %d", (int) producer->counter->tid);
++		}
++		read_unlock_irqrestore(&group->members_lock, members_lock_flags);
++		measures = (struct hrm_measures *)
++			HRM_MEASURES_ADDR(group->measures_goal.kernel_address);
++		goal = (struct hrm_goal *)
++			HRM_GOAL_ADDR(group->measures_goal.kernel_address);
++		hr = hrm_get_heart_rate(group, &scope, 0);
++		min = hrm_get_min_heart_rate(group, &scope);
++		max = hrm_get_max_heart_rate(group, &scope);
++		seq_printf(seq_file, "\n"
++				"minimum heart rate: %llu [hb/%d / s]\n"
++				"maximum heart rate: %llu [hb/%d / s]\n"
++				"goal scope: %zu\n"
++				"\tglobal heart rate: %llu [hb/%d / s]\n",
++				(unsigned long long) min, HRM_MEASURE_SCALE,
++				(unsigned long long) max, HRM_MEASURE_SCALE,
++				scope,
++				(unsigned long) hr, HRM_MEASURE_SCALE);
++
++		for (i = 1; i <= HRM_MAX_WINDOWS; i++) {
++			hr = hrm_get_heart_rate(group, &scope, i);
++			if (scope != HRM_MAX_WINDOW_SIZE)
++				seq_printf(seq_file, "window %d\n"
++					"\twindow heart rate: %llu [hb/%d / s]\n"
++					"\twindow size: %u\n",
++					i,
++					(unsigned long long) hr, HRM_MEASURE_SCALE,
++					(unsigned int) scope);
++		}
++	}
++	spin_unlock(&hrm_groups_lock);
++	return 0;
++}
++
++static int hrm_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, hrm_show, NULL);
++}
++
++static const struct file_operations proc_hrm_operations = {
++	.llseek = seq_lseek,
++	.read = seq_read,
++	.open = hrm_open,
++	.release = single_release,
++};
++
++static int __init proc_hrm_init(void)
++{
++	proc_create("hrm", 0444, NULL, &proc_hrm_operations);
++	return 0;
++}
++module_init(proc_hrm_init);
++
+diff --git a/include/linux/Kbuild b/include/linux/Kbuild
+index 619b565..8993a04 100644
+--- a/include/linux/Kbuild
++++ b/include/linux/Kbuild
+@@ -151,6 +151,7 @@ header-y += hid.h
+ header-y += hiddev.h
+ header-y += hidraw.h
+ header-y += hpet.h
++header-y += hrm.h
+ header-y += hysdn_if.h
+ header-y += i2c-dev.h
+ header-y += i2c.h
+diff --git a/include/linux/hrm.h b/include/linux/hrm.h
+new file mode 100644
+index 0000000..46fddbc
+--- /dev/null
++++ b/include/linux/hrm.h
+@@ -0,0 +1,198 @@
++#ifndef _LINUX_HRM_H
++#define _LINUX_HRM_H
++
++#define HRM_MAX_WINDOWS 32
++#define HRM_MEASURE_SCALE 1000
++
++#ifndef __KERNEL__
++#define NSEC_PER_SEC 1000000000
++
++typedef uint64_t u64;
++typedef uint32_t u32;
++typedef int64_t s64;
++typedef int32_t s32;
++#endif
++
++struct hrm_counter {
++	pid_t tid;
++	int used;
++
++	u64 counter;
++};
++
++struct hrm_measure {
++	u64 count;
++	u64 time;
++};
++
++struct hrm_measures {
++	struct hrm_measure global;
++	struct hrm_measure window[HRM_MAX_WINDOWS];
++};
++
++struct hrm_goal {
++	int goal_lock;
++	u64 min_heart_rate;
++	u64 max_heart_rate;
++	size_t scope;
++
++	size_t window_size[HRM_MAX_WINDOWS];
++};
++
++#ifdef __KERNEL__
++
++#include <asm/cache.h>
++#include <linux/fs.h>
++#include <linux/hrtimer.h>
++#include <linux/list.h>
++#include <linux/mm.h>
++#include <linux/spinlock.h>
++#include <linux/time.h>
++#include <linux/types.h>
++
++#define HRM_PAGE_GROUP_SIZE (PAGE_SIZE / L1_CACHE_BYTES)
++
++#define HRM_GROUP_ORDER (CONFIG_HRM_GROUP_ORDER)
++#define HRM_GROUP_SIZE ((1 << HRM_GROUP_ORDER) * HRM_PAGE_GROUP_SIZE)
++#define HRM_MAX_WINDOW_SIZE (1 << CONFIG_HRM_MAX_WINDOW_SIZE)
++#define HRM_TIMER_PERIOD (CONFIG_HRM_TIMER_PERIOD)
++
++#define HRM_COUNTER_ADDR(address, index) ((unsigned long) (address) + L1_CACHE_BYTES * (index))
++#define HRM_COUNTERS_ADDR(address) ((unsigned long) (address))
++#define HRM_MEASURES_ADDR(address) ((unsigned long) (address))
++#define HRM_GOAL_ADDR(address) ((unsigned long) (address) + PAGE_SIZE - \
++	sizeof(struct hrm_goal))
++
++extern struct list_head hrm_groups;
++extern spinlock_t hrm_groups_lock;
++
++struct hrm_memory {
++	unsigned long kernel_address;
++	size_t size;
++
++	struct list_head maps;
++};
++
++struct hrm_window_span {
++		int begin;
++		int end;
++};
++
++struct hrm_group {
++	int gid;
++
++	struct hrm_memory counters;
++	struct hrm_memory measures_goal;
++
++	struct {
++		int window_cur;
++		int buffered;
++
++		struct {
++			u64 counter;
++			struct timespec elapsed_time;
++		} window[HRM_MAX_WINDOW_SIZE];
++
++		u64 history;
++	} history;
++
++	DECLARE_BITMAP(counters_allocation, HRM_GROUP_SIZE);
++
++	struct hrtimer timer;
++
++	struct timespec timestamp;
++
++	struct list_head producers;
++	struct list_head consumers;
++	rwlock_t members_lock;
++
++	struct list_head link;
++};
++
++struct hrm_producer {
++	struct task_struct *task;
++
++	int counter_index;
++
++	struct hrm_counter *counter;
++	struct hrm_measures *measures;
++	struct hrm_goal *goal;
++
++	struct hrm_group *group;
++
++	unsigned long counter_user_address;
++	unsigned long measures_user_address;
++	unsigned long goal_user_address;
++
++	struct list_head task_link;
++	struct list_head group_link;
++};
++
++struct hrm_consumer {
++	struct hrm_group *group;
++
++	unsigned long counter_user_address;
++	unsigned long measures_user_address;
++	unsigned long goal_user_address;
++
++	struct list_head task_link;
++	struct list_head group_link;
++};
++
++struct hrm_producer *__hrm_find_producer_struct(struct task_struct *task,
++								int gid);
++int hrm_add_producer_task_to_group(struct task_struct *task, int gid);
++int hrm_delete_producer_task_from_group(struct task_struct *task, int gid);
++int hrm_delete_producer_task_from_all_groups(struct task_struct *task);
++int hrm_producer_task_enabled_group(struct task_struct *task, int gid);
++int hrm_producer_task_enabled(struct task_struct *task);
++
++struct hrm_consumer *__hrm_find_consumer_struct(struct task_struct *task,
++								int gid);
++int hrm_add_consumer_task_to_group(struct task_struct *task, int gid);
++int hrm_delete_consumer_task_from_group(struct task_struct *task, int gid);
++int hrm_delete_consumer_task_from_all_groups(struct task_struct *task);
++int hrm_consumer_task_enabled_group(struct task_struct *task, int gid);
++int hrm_consumer_task_enabled(struct task_struct *task);
++
++int __hrm_add_group_memory_map(struct task_struct *task,
++		struct hrm_memory *memory, unsigned long user_address);
++int __hrm_get_group_memory_map(struct task_struct *task,
++						struct hrm_memory *memory);
++int __hrm_put_group_memory_map(struct task_struct *task,
++						struct hrm_memory *memory);
++unsigned long __hrm_find_group_memory_map(struct task_struct *task,
++						struct hrm_memory *memory);
++
++ssize_t hrm_producer_group_write(struct file *file, const char __user *buf,
++						size_t size, loff_t *off);
++ssize_t hrm_consumer_group_write(struct file *file, const char __user *buf,
++						size_t size, loff_t *off);
++ssize_t hrm_producer_counter_read(struct file *file, char __user *buf,
++						size_t size, loff_t *off);
++int hrm_producer_counter_mmap(struct file* file, struct vm_area_struct *vma);
++ssize_t hrm_consumer_counter_read(struct file *file, char __user *buf,
++						size_t size, loff_t *off);
++int hrm_consumer_counter_mmap(struct file* file, struct vm_area_struct *vma);
++ssize_t hrm_producer_measures_goal_read(struct file *file, char __user *buf,
++						size_t size, loff_t *off);
++int hrm_producer_measures_goal_mmap(struct file* file,
++						struct vm_area_struct *vma);
++ssize_t hrm_consumer_measures_goal_read(struct file *file, char __user *buf,
++						size_t size, loff_t *off);
++int hrm_consumer_measures_goal_mmap(struct file* file,
++						struct vm_area_struct *vma);
++
++/* Kernelspace consumer API */
++u64
++hrm_seek_heart_rate(const struct hrm_group* group, size_t window_size, int *key);
++u64
++hrm_get_heart_rate(const struct hrm_group* group, size_t *window_size, int key);
++u64 hrm_get_min_heart_rate(const struct hrm_group* group, size_t *window_size);
++u64 hrm_get_max_heart_rate(const struct hrm_group* group, size_t *window_size);
++/* */
++
++#endif
++
++#endif /* _LINUX_HRM_H_ */
++
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 1c4f3e9..8030ce2 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -94,6 +94,10 @@ struct sched_param {
+ 
+ #include <asm/processor.h>
+ 
++#ifdef CONFIG_HRM
++#include <linux/hrm.h>
++#endif
++
+ struct exec_domain;
+ struct futex_pi_state;
+ struct robust_list_head;
+@@ -1572,6 +1576,10 @@ struct task_struct {
+ #ifdef CONFIG_HAVE_HW_BREAKPOINT
+ 	atomic_t ptrace_bp_refcnt;
+ #endif
++#ifdef CONFIG_HRM
++	struct list_head hrm_producers;
++	struct list_head hrm_consumers;
++#endif
+ };
+ 
+ /* Future-safe accessor for struct task_struct's cpus_allowed. */
+diff --git a/init/Kconfig b/init/Kconfig
+index 43298f9..143cdd9 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -1296,6 +1296,86 @@ source "arch/Kconfig"
+ 
+ endmenu		# General setup
+ 
++menu "Autonomic Operating System"
++
++menu "Monitors"
++
++config HRM
++	depends on PROC_FS
++	depends on IKCONFIG_PROC
++	bool "Enable Heart Rate Monitor"
++	default n
++choice
++	depends on HRM
++	prompt "Group size"
++	default HRM_GROUP_ORDER_0
++	help
++		Select group size.
++
++config HRM_GROUP_ORDER_0
++	bool "64 tasks"
++config HRM_GROUP_ORDER_1
++	bool "128 tasks"
++config HRM_GROUP_ORDER_2
++	bool "256 tasks"
++config HRM_GROUP_ORDER_3
++	bool "512 tasks"
++config HRM_GROUP_ORDER_4
++	bool "1024 tasks"
++
++endchoice
++
++config HRM_GROUP_ORDER
++	depends on HRM
++	int
++	default 0 if HRM_GROUP_ORDER_0
++	default 1 if HRM_GROUP_ORDER_1
++	default 2 if HRM_GROUP_ORDER_2
++	default 3 if HRM_GROUP_ORDER_3
++	default 4 if HRM_GROUP_ORDER_4
++
++config HRM_MAX_WINDOW_SIZE
++	depends on HRM
++	int "Window size (7 => 128, 8 => 256, ..., 11 => 2048)."
++	range 7 11
++	default 10
++	help
++		Select window size as a power of 2.
++		Examples:
++			 7 =>  128
++			 8 =>  256
++			 9 =>  512
++			10 => 1024 
++			11 => 2048
++
++choice
++	depends on HRM
++	prompt "Timer period"
++	default HRM_TIMER_PERIOD_100
++
++config HRM_TIMER_PERIOD_1
++	bool "1 ms"
++config HRM_TIMER_PERIOD_10
++	bool "10 ms"
++config HRM_TIMER_PERIOD_100
++	bool "100 ms"
++config HRM_TIMER_PERIOD_1000
++	bool "1000 ms"
++
++endchoice
++
++config HRM_TIMER_PERIOD
++	depends on HRM
++	int
++	default 1000 if HRM_TIMER_PERIOD_1
++	default 10000 if HRM_TIMER_PERIOD_10
++	default 100000 if HRM_TIMER_PERIOD_100
++	default 1000000 if HRM_TIMER_PERIOD_1000
++
++endmenu
++
++endmenu
++
+ config HAVE_GENERIC_DMA_COHERENT
+ 	bool
+ 	default n
+diff --git a/install_headers.sh b/install_headers.sh
+new file mode 100755
+index 0000000..a439494
+--- /dev/null
++++ b/install_headers.sh
+@@ -0,0 +1,10 @@
++INST=hdrs
++DEST=/usr/include
++
++make rmproper
++make headers_check
++make INSTALL_HDR_PATH=${INST}  headers_install
++find ${INST}/include \( -name .install -o -name ..install.cmd \) -delete
++sudo cp -rv ${INST}/include/* ${DEST}
++rm -rf ${INST}
++
+diff --git a/kernel/Makefile b/kernel/Makefile
+index e898c5b..2c8ca8c 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -13,6 +13,8 @@ obj-y     = sched.o fork.o exec_domain.o panic.o printk.o \
+ 	    async.o range.o
+ obj-y += groups.o
+ 
++obj-$(CONFIG_HRM) += hrm.o
++
+ ifdef CONFIG_FUNCTION_TRACER
+ # Do not trace debug files and internal ftrace files
+ CFLAGS_REMOVE_lockdep.o = -pg
+diff --git a/kernel/exit.c b/kernel/exit.c
+index e6e01b9..a3afd1f 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -57,6 +57,10 @@
+ #include <asm/pgtable.h>
+ #include <asm/mmu_context.h>
+ 
++#ifdef CONFIG_HRM
++#include <linux/hrm.h>
++#endif
++
+ static void exit_mm(struct task_struct * tsk);
+ 
+ static void __unhash_process(struct task_struct *p, bool group_dead)
+@@ -915,6 +919,13 @@ NORET_TYPE void do_exit(long code)
+ 
+ 	validate_creds_for_do_exit(tsk);
+ 
++#ifdef CONFIG_HRM
++	if (hrm_producer_task_enabled(tsk))
++		hrm_delete_producer_task_from_all_groups(tsk);
++	if (hrm_consumer_task_enabled(tsk))
++		hrm_delete_consumer_task_from_all_groups(tsk);
++#endif
++
+ 	/*
+ 	 * We're taking recursive faults here in do_exit. Safest is to just
+ 	 * leave this task alone and wait for reboot.
+diff --git a/kernel/fork.c b/kernel/fork.c
+index da4a6a1..8cad299 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -76,6 +76,10 @@
+ 
+ #include <trace/events/sched.h>
+ 
++#ifdef CONFIG_HRM
++#include <linux/hrm.h>
++#endif
++
+ /*
+  * Protected counters by write_lock_irq(&tasklist_lock)
+  */
+@@ -1367,6 +1371,11 @@ static struct task_struct *copy_process(unsigned long clone_flags,
+ 		nr_threads++;
+ 	}
+ 
++#ifdef CONFIG_HRM
++	INIT_LIST_HEAD(&p->hrm_producers);
++	INIT_LIST_HEAD(&p->hrm_consumers);
++#endif
++
+ 	total_forks++;
+ 	spin_unlock(&current->sighand->siglock);
+ 	write_unlock_irq(&tasklist_lock);
+diff --git a/kernel/hrm.c b/kernel/hrm.c
+new file mode 100644
+index 0000000..4e85a5e
+--- /dev/null
++++ b/kernel/hrm.c
+@@ -0,0 +1,774 @@
++#include <asm/mman.h>
++#include <linux/err.h>
++#include <linux/ktime.h>
++#include <linux/math64.h>
++#include <linux/sched.h>
++#include <linux/slab.h>
++
++#include <linux/hrm.h>
++
++struct hrm_memory_map {
++	pid_t pid;
++	unsigned long user_address;
++
++	int references;
++
++	struct list_head link;
++};
++
++LIST_HEAD(hrm_groups);
++DEFINE_SPINLOCK(hrm_groups_lock);
++
++static enum hrtimer_restart __hrm_update_group_measures(struct hrtimer *timer)
++{
++	struct hrm_group *group;
++	struct hrm_measures *measures;
++	struct hrm_goal *goal;
++	unsigned long members_lock_flags;
++	struct timespec current_time;
++	u64 heartbeats = 0;
++	struct hrm_producer *producer;
++	struct timespec elapsed_time, elapsed_time_w;
++	u64 heartbeats_w = 0;
++	size_t ws;
++	int window_first;
++	int i;
++
++	group = container_of(timer, struct hrm_group, timer);
++	measures = (struct hrm_measures *) HRM_MEASURES_ADDR(group->measures_goal.kernel_address);
++	goal = (struct hrm_goal *) HRM_GOAL_ADDR(group->measures_goal.kernel_address);
++
++	read_lock_irqsave(&group->members_lock, members_lock_flags);
++
++	hrtimer_start(&group->timer, ktime_set(0, (unsigned long)
++			NSEC_PER_USEC * HRM_TIMER_PERIOD), HRTIMER_MODE_REL);
++
++	getrawmonotonic(&current_time);
++	elapsed_time = timespec_sub(current_time, group->timestamp);
++	measures->global.time = (u64) timespec_to_ns(&elapsed_time);
++
++	heartbeats = group->history.history;
++	list_for_each_entry (producer, &group->producers, group_link) {
++		heartbeats += producer->counter->counter;
++	}
++	measures->global.count = heartbeats;
++
++	group->history.window[group->history.window_cur].counter = heartbeats;
++	group->history.window[group->history.window_cur].elapsed_time = elapsed_time;
++
++	if (unlikely(group->history.buffered == 0))
++		goto empty_buffer;
++
++	for (i = 0; i < HRM_MAX_WINDOWS; i++) {
++		ws = goal->window_size[i];
++		if (ws != 0) {
++			if (ws > group->history.buffered)
++				ws = group->history.buffered;
++
++			window_first =
++				(group->history.window_cur - ws) &
++							(HRM_MAX_WINDOW_SIZE - 1);
++
++			heartbeats_w = heartbeats -
++				group->history.window[window_first].counter;
++			elapsed_time_w =
++				timespec_sub(elapsed_time,
++				group->history.window[window_first].elapsed_time);
++			measures->window[i].count = heartbeats_w;
++			measures->window[i].time = (u64)timespec_to_ns(&elapsed_time_w);
++		}
++	}
++
++empty_buffer:
++	if (group->history.buffered < HRM_MAX_WINDOW_SIZE)
++		group->history.buffered++;
++	group->history.window_cur =
++			(group->history.window_cur + 1) & (HRM_MAX_WINDOW_SIZE - 1);
++
++	read_unlock_irqrestore(&group->members_lock, members_lock_flags);
++
++	return HRTIMER_NORESTART;
++}
++
++static struct hrm_group *__hrm_create_group(int gid)
++{
++	struct hrm_group *group;
++
++	group = (struct hrm_group *) kzalloc(sizeof(struct hrm_group), GFP_KERNEL);
++	if (group == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d kzalloc() failed\n", __LINE__);
++		group = ERR_PTR(-ENOMEM);
++		goto failure_kzalloc_group;
++	}
++
++	group->counters.kernel_address = __get_free_pages(GFP_KERNEL | __GFP_ZERO, HRM_GROUP_ORDER);
++	if (group->counters.kernel_address == 0) {
++		printk(KERN_ERR __FILE__ " @ %d __get_free_pages() failed\n", __LINE__);
++		group = ERR_PTR(-ENOMEM);
++		goto failure_get_free_pages;
++	}
++	group->counters.size = HRM_GROUP_SIZE * L1_CACHE_BYTES;
++	INIT_LIST_HEAD(&group->counters.maps);
++
++	group->measures_goal.kernel_address = get_zeroed_page(GFP_KERNEL);
++	if (group->measures_goal.kernel_address == 0) {
++		printk(KERN_ERR __FILE__ " @ %d get_zeroed_page() failed\n", __LINE__);
++		group = ERR_PTR(-ENOMEM);
++		goto failure_get_zeroed_page;
++	}
++	group->measures_goal.size = PAGE_SIZE;
++	INIT_LIST_HEAD(&group->measures_goal.maps);
++
++	group->gid = gid;
++
++	bitmap_zero(group->counters_allocation, HRM_GROUP_SIZE);
++
++	hrtimer_init(&group->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	group->timer.function = __hrm_update_group_measures;
++
++	INIT_LIST_HEAD(&group->producers);
++	INIT_LIST_HEAD(&group->consumers);
++	group->members_lock = __RW_LOCK_UNLOCKED(group->members_lock);
++
++	INIT_LIST_HEAD(&group->link);
++
++	return group;
++
++failure_get_zeroed_page:
++	free_pages(group->counters.kernel_address, HRM_GROUP_ORDER);
++failure_get_free_pages:
++	kfree(group);
++failure_kzalloc_group:
++	return group;
++}
++
++static int __hrm_destroy_group(struct hrm_group *group)
++{
++	hrtimer_cancel(&group->timer);
++
++	free_page(group->measures_goal.kernel_address);
++	free_pages(group->counters.kernel_address, HRM_GROUP_ORDER);
++	kfree(group);
++
++	return 0;
++}
++
++static int __hrm_add_group(struct hrm_group *group)
++{
++	list_add(&group->link, &hrm_groups);
++
++	return 0;
++}
++
++static int __hrm_delete_group(struct hrm_group *group)
++{
++	list_del(&group->link);
++
++	return 0;
++}
++
++static struct hrm_group *__hrm_find_group(int gid)
++{
++	struct hrm_group *group;
++
++	list_for_each_entry (group, &hrm_groups, link) {
++		if (group->gid == gid)
++			return group;
++	}
++
++	return NULL;
++}
++
++static int __hrm_allocate_group_counter(struct hrm_group *group)
++{
++	int counter_index = 0;
++
++	counter_index = bitmap_find_free_region(group->counters_allocation, HRM_GROUP_SIZE, 0);
++	if (counter_index < 0) {
++		printk(KERN_ERR __FILE__ " @ %d bitmap_find_free_region() failed\n", __LINE__);
++		return counter_index;
++	}
++
++	return counter_index;
++}
++
++static int __hrm_release_group_counter(struct hrm_group *group, int counter_index)
++{
++	bitmap_release_region(group->counters_allocation, counter_index, 0);
++
++	return 0;
++}
++
++struct hrm_producer *__hrm_find_producer_struct(struct task_struct *task, int gid)
++{
++	struct hrm_producer *producer;
++
++	list_for_each_entry (producer, &task->hrm_producers, task_link) {
++		if (producer->group->gid == gid)
++			return producer;
++	}
++
++	return NULL;
++}
++
++int hrm_add_producer_task_to_group(struct task_struct *task, int gid)
++{
++	int retval = 0;
++	struct hrm_producer *producer;
++	struct hrm_group *group;
++	int group_exists = 0;
++	unsigned long members_lock_flags;
++	int counter_index;
++	struct timespec current_time;
++
++	if (task == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task not valid\n", __LINE__);
++		return -EINVAL;
++	}
++
++	if (__hrm_find_producer_struct(task, gid) != NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task %d already enabled for group %d\n", __LINE__, (int) task->pid, gid);
++		return -EINVAL;
++	}
++
++	producer = (struct hrm_producer *) kzalloc(sizeof(struct hrm_producer), GFP_KERNEL);
++	if (producer == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d kzalloc() failed\n", __LINE__);
++		return -ENOMEM;
++	}
++
++	spin_lock(&hrm_groups_lock);
++
++	group = __hrm_find_group(gid);
++	if (group == NULL) {
++		group = __hrm_create_group(gid);
++		if (IS_ERR(group)) {
++			printk(KERN_ERR __FILE__ " @ %d __hrm_create_group() failed\n", __LINE__);
++			retval = PTR_ERR(group);
++			goto failure_create_group;
++		}
++	} else {
++		group_exists = 1;
++	}
++
++	counter_index = __hrm_allocate_group_counter(group);
++	if (counter_index < 0) {
++		printk(KERN_ERR __FILE__ " @ %d __hrm_allocate_group_counter() failed\n", __LINE__);
++		retval = counter_index;
++		goto failure_allocate_group_counter;
++	}
++
++	producer->task = task;
++	producer->counter_index = counter_index;
++	producer->counter = (struct hrm_counter *) HRM_COUNTER_ADDR(group->counters.kernel_address, counter_index);
++	producer->counter->tid = task->pid;
++	producer->counter->used = 1;
++	producer->measures = (struct hrm_measures *) HRM_MEASURES_ADDR(group->measures_goal.kernel_address);
++	producer->goal = (struct hrm_goal *) HRM_GOAL_ADDR(group->measures_goal.kernel_address);
++	producer->group = group;
++	INIT_LIST_HEAD(&producer->task_link);
++	INIT_LIST_HEAD(&producer->group_link);
++
++	write_lock_irqsave(&group->members_lock, members_lock_flags);
++	list_add(&producer->task_link, &task->hrm_producers);
++	list_add(&producer->group_link, &group->producers);
++	write_unlock_irqrestore(&group->members_lock, members_lock_flags);
++
++	if (!timespec_to_ns(&group->timestamp)) {
++		if (!group_exists)
++			__hrm_add_group(group);
++		getrawmonotonic(&current_time);
++		group->timestamp = current_time;
++		group->history.window_cur = 1;
++		group->history.buffered = 1;
++		hrtimer_start(&group->timer, ktime_set(0, NSEC_PER_USEC * HRM_TIMER_PERIOD), HRTIMER_MODE_REL);
++	}
++
++	spin_unlock(&hrm_groups_lock);
++
++	return retval;
++
++failure_allocate_group_counter:
++	if (!group_exists)
++		__hrm_destroy_group(group);
++failure_create_group:
++	spin_unlock(&hrm_groups_lock);
++	kfree(producer);
++
++	return retval;
++}
++
++int hrm_delete_producer_task_from_group(struct task_struct *task, int gid)
++{
++	struct hrm_producer *producer;
++	struct hrm_group *group;
++	unsigned long members_lock_flags;
++
++	if (task == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task not valid\n", __LINE__);
++		return -EINVAL;
++	}
++
++	producer = __hrm_find_producer_struct(task, gid);
++	if (producer == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not enabled for group %d\n", __LINE__, (int) task->pid, gid);
++		return -EINVAL;
++	}
++	group = producer->group;
++	producer->counter->used = 0;
++	group->history.history += producer->counter->counter;
++	__hrm_release_group_counter(group, producer->counter_index);
++
++	spin_lock(&hrm_groups_lock);
++	write_lock_irqsave(&group->members_lock, members_lock_flags);
++	list_del(&producer->task_link);
++	list_del(&producer->group_link);
++	kfree(producer);
++	__hrm_put_group_memory_map(task, &group->counters);
++	__hrm_put_group_memory_map(task, &group->measures_goal);
++	if (list_empty(&group->producers) && list_empty(&group->consumers)) {
++		__hrm_delete_group(group);
++		write_unlock_irqrestore(&group->members_lock, members_lock_flags);
++		__hrm_destroy_group(group);
++	} else {
++		write_unlock_irqrestore(&group->members_lock, members_lock_flags);
++	}
++	spin_unlock(&hrm_groups_lock);
++
++	return 0;
++}
++
++int hrm_delete_producer_task_from_all_groups(struct task_struct *task)
++{
++	struct hrm_producer *producer;
++	struct hrm_producer *producer_fallback;
++	struct hrm_group *group;
++	unsigned long members_lock_flags;
++
++	if (task == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task not valid\n", __LINE__);
++		return -EINVAL;
++	}
++
++	if (!hrm_producer_task_enabled(task)) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not enabled\n", __LINE__, (int) task->pid);
++		return -EINVAL;
++	}
++
++	spin_lock(&hrm_groups_lock);
++	list_for_each_entry_safe (producer, producer_fallback, &task->hrm_producers, task_link) {
++		group = producer->group;
++		group->history.history += producer->counter->counter;
++		__hrm_release_group_counter(group, producer->counter_index);
++		write_lock_irqsave(&group->members_lock, members_lock_flags);
++		list_del(&producer->task_link);
++		list_del(&producer->group_link);
++		kfree(producer);
++		__hrm_put_group_memory_map(task, &group->counters);
++		__hrm_put_group_memory_map(task, &group->measures_goal);
++		if (list_empty(&group->producers) && list_empty(&group->consumers)) {
++			__hrm_delete_group(group);
++			write_unlock_irqrestore(&group->members_lock, members_lock_flags);
++			__hrm_destroy_group(group);
++		} else {
++			write_unlock_irqrestore(&group->members_lock, members_lock_flags);
++		}
++	}
++	spin_unlock(&hrm_groups_lock);
++
++	return 0;
++}
++
++int hrm_producer_task_enabled_group(struct task_struct *task, int gid)
++{
++	if (task == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task not valid\n", __LINE__);
++		return -EINVAL;
++	}
++
++	return __hrm_find_producer_struct(task, gid) != NULL;
++}
++
++int hrm_producer_task_enabled(struct task_struct *task)
++{
++	if (task == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task not valid\n", __LINE__);
++		return -EINVAL;
++	}
++
++	return !list_empty(&task->hrm_producers);
++}
++
++struct hrm_consumer *__hrm_find_consumer_struct(struct task_struct *task, int gid)
++{
++	struct hrm_consumer *consumer;
++
++	list_for_each_entry (consumer, &task->hrm_consumers, task_link) {
++		if (consumer->group->gid == gid)
++			return consumer;
++	}
++
++	return NULL;
++}
++
++int hrm_add_consumer_task_to_group(struct task_struct *task, int gid)
++{
++	int retval = 0;
++	struct hrm_consumer *consumer;
++	struct hrm_group *group;
++	int group_exists = 0;
++	unsigned long members_lock_flags;
++
++	if (task == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task not valid\n", __LINE__);
++		return -EINVAL;
++	}
++
++	if (__hrm_find_consumer_struct(task, gid) != NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task %d already enabled for group %d\n", __LINE__, (int) task->pid, gid);
++		return -EINVAL;
++	}
++
++	consumer = (struct hrm_consumer *) kzalloc(sizeof(struct hrm_consumer), GFP_KERNEL);
++	if (consumer == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d kzalloc() failed\n", __LINE__);
++		return -ENOMEM;
++	}
++
++	spin_lock(&hrm_groups_lock);
++
++	group = __hrm_find_group(gid);
++	if (group == NULL) {
++		group = __hrm_create_group(gid);
++		if (IS_ERR(group)) {
++			printk(KERN_ERR __FILE__ " @ %d __hrm_create_group() failed\n", __LINE__);
++			retval = PTR_ERR(group);
++			goto failure_create_group;
++		}
++	} else {
++		group_exists = 1;
++	}
++
++	consumer->group = group;
++	INIT_LIST_HEAD(&consumer->task_link);
++	INIT_LIST_HEAD(&consumer->group_link);
++
++	write_lock_irqsave(&group->members_lock, members_lock_flags);
++	list_add(&consumer->task_link, &task->hrm_consumers);
++	list_add(&consumer->group_link, &group->consumers);
++	write_unlock_irqrestore(&group->members_lock, members_lock_flags);
++
++	if (!group_exists)
++		__hrm_add_group(group);
++
++	spin_unlock(&hrm_groups_lock);
++
++	return retval;
++
++failure_create_group:
++	spin_unlock(&hrm_groups_lock);
++	kfree(consumer);
++
++	return retval;
++}
++
++int hrm_delete_consumer_task_from_group(struct task_struct *task, int gid)
++{
++	struct hrm_consumer *consumer;
++	struct hrm_group *group;
++	unsigned long members_lock_flags;
++
++	if (task == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task not valid\n", __LINE__);
++		return -EINVAL;
++	}
++
++	consumer = __hrm_find_consumer_struct(task, gid);
++	if (consumer == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not enabled for group %d\n", __LINE__, (int) task->pid, gid);
++		return -EINVAL;
++	}
++	group = consumer->group;
++
++	spin_lock(&hrm_groups_lock);
++	write_lock_irqsave(&group->members_lock, members_lock_flags);
++	list_del(&consumer->task_link);
++	list_del(&consumer->group_link);
++	kfree(consumer);
++	__hrm_put_group_memory_map(task, &group->counters);
++	__hrm_put_group_memory_map(task, &group->measures_goal);
++	if (list_empty(&group->producers) && list_empty(&group->consumers)) {
++		__hrm_delete_group(group);
++		write_unlock_irqrestore(&group->members_lock, members_lock_flags);
++		__hrm_destroy_group(group);
++	} else {
++		write_unlock_irqrestore(&group->members_lock, members_lock_flags);
++	}
++	spin_unlock(&hrm_groups_lock);
++
++	return 0;
++}
++
++int hrm_delete_consumer_task_from_all_groups(struct task_struct *task)
++{
++	struct hrm_consumer *consumer;
++	struct hrm_consumer *consumer_fallback;
++	struct hrm_group *group;
++	unsigned long members_lock_flags;
++
++	if (task == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task not valid\n", __LINE__);
++		return -EINVAL;
++	}
++
++	if (!hrm_consumer_task_enabled(task)) {
++		printk(KERN_ERR __FILE__ " @ %d task %d not enabled\n", __LINE__, (int) task->pid);
++		return -EINVAL;
++	}
++
++	spin_lock(&hrm_groups_lock);
++	list_for_each_entry_safe (consumer, consumer_fallback, &task->hrm_consumers, task_link) {
++		group = consumer->group;
++		write_lock_irqsave(&group->members_lock, members_lock_flags);
++		list_del(&consumer->task_link);
++		list_del(&consumer->group_link);
++		kfree(consumer);
++		__hrm_put_group_memory_map(task, &group->counters);
++		__hrm_put_group_memory_map(task, &group->measures_goal);
++		if (list_empty(&group->producers) && list_empty(&group->consumers)) {
++			__hrm_delete_group(group);
++			write_unlock_irqrestore(&group->members_lock, members_lock_flags);
++			__hrm_destroy_group(group);
++		} else {
++			write_unlock_irqrestore(&group->members_lock, members_lock_flags);
++		}
++	}
++	spin_unlock(&hrm_groups_lock);
++
++	return 0;
++}
++
++int hrm_consumer_task_enabled_group(struct task_struct *task, int gid)
++{
++	if (task == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task not valid\n", __LINE__);
++		return -EINVAL;
++	}
++
++	return __hrm_find_consumer_struct(task, gid) != NULL;
++}
++
++int hrm_consumer_task_enabled(struct task_struct *task)
++{
++	if (task == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d task not valid\n", __LINE__);
++		return -EINVAL;
++	}
++
++	return !list_empty(&task->hrm_consumers);
++}
++
++int __hrm_add_group_memory_map(struct task_struct *task, struct hrm_memory *memory, unsigned long user_address)
++{
++	struct hrm_memory_map *memory_map;
++
++	memory_map = (struct hrm_memory_map *) kzalloc(sizeof(struct hrm_memory_map), GFP_KERNEL);
++	if (memory_map == NULL) {
++		printk(KERN_ERR __FILE__ " @ %d kzalloc() failed\n", __LINE__);
++		return -ENOMEM;
++	}
++	memory_map->pid = task->tgid;
++	memory_map->user_address = user_address;
++	memory_map->references = 1;
++	INIT_LIST_HEAD(&memory_map->link);
++	list_add(&memory_map->link, &memory->maps);
++	return 0;
++}
++
++int __hrm_get_group_memory_map(struct task_struct *task, struct hrm_memory *memory)
++{
++	struct hrm_memory_map *memory_map;
++
++	list_for_each_entry (memory_map, &memory->maps, link) {
++		if (memory_map->pid == task->tgid) {
++			memory_map->references++;
++			return 0;
++		}
++	}
++	return -ESRCH;
++}
++
++int __hrm_put_group_memory_map(struct task_struct *task, struct hrm_memory *memory)
++{
++	struct hrm_memory_map *memory_map;
++	struct hrm_memory_map *memory_map_fallback;
++
++	list_for_each_entry_safe (memory_map, memory_map_fallback, &memory->maps, link) {
++		if (memory_map->pid == task->tgid) {
++			memory_map->references--;
++			if (memory_map->references == 0) {
++				list_del(&memory_map->link);
++				kfree(memory_map);
++			}
++			return 0;
++		}
++	}
++	return -ESRCH;
++}
++
++unsigned long __hrm_find_group_memory_map(struct task_struct *task, struct hrm_memory *memory)
++{
++	struct hrm_memory_map *memory_map;
++
++	list_for_each_entry (memory_map, &memory->maps, link) {
++		if (memory_map->pid == task->tgid)
++			return memory_map->user_address;
++	}
++	return 0;
++}
++
++static inline u64 __hrm_compute_hr(u64 count, u64 time)
++{
++	return (count * USEC_PER_SEC) / (time / MSEC_PER_SEC / HRM_MEASURE_SCALE);
++
++}
++
++u64
++hrm_seek_heart_rate(const struct hrm_group* group, size_t window_size, int *key)
++{
++	struct hrm_goal *goal = NULL;
++	struct hrm_measures *measures;
++	u64 hr = 0;
++	int i;
++
++	if (!group) {
++		*key = -EFAULT;
++		goto exit;
++	}
++	if (window_size > HRM_MAX_WINDOW_SIZE) {
++		*key = -EINVAL;
++		goto exit;
++	}
++
++	goal = (struct hrm_goal *)
++			HRM_GOAL_ADDR(group->measures_goal.kernel_address);
++	measures = (struct hrm_measures *)
++			HRM_MEASURES_ADDR(group->measures_goal.kernel_address);
++
++	if (window_size == 0) {
++		*key = 0;
++		while(__sync_lock_test_and_set(&goal->goal_lock, 1));
++		if (measures->global.time)
++			hr = __hrm_compute_hr(measures->global.count,
++							measures->global.time);
++		__sync_lock_release(&goal->goal_lock);
++
++		goto exit;
++	}
++
++	while(__sync_lock_test_and_set(&goal->goal_lock, 1));
++	for (i = 0; i < HRM_MAX_WINDOWS; i++)
++		if (goal->window_size[i] == window_size &&
++						measures->window[i].time) {
++			*key = i + 1;
++			hr = __hrm_compute_hr(measures->window[i].count,
++						measures->window[i].time);
++			break;
++		}
++	__sync_lock_release(&goal->goal_lock);
++
++	if (i == HRM_MAX_WINDOWS)
++		*key = -EINVAL;
++
++exit:
++	return hr;
++}
++
++u64
++hrm_get_heart_rate(const struct hrm_group* group, size_t *window_size, int key)
++{
++	struct hrm_goal *goal = NULL;
++	struct hrm_measures *measures;
++	u64 hr = 0;
++
++	if (!group) {
++		*window_size = HRM_MAX_WINDOW_SIZE;
++		goto exit;
++	}
++	if (key < 0 || key > HRM_MAX_WINDOWS) {
++		*window_size = HRM_MAX_WINDOW_SIZE;
++		goto exit;
++	}
++
++	goal = (struct hrm_goal *)
++			HRM_GOAL_ADDR(group->measures_goal.kernel_address);
++	measures = (struct hrm_measures *)
++			HRM_MEASURES_ADDR(group->measures_goal.kernel_address);
++
++	if (key == 0) {
++		*window_size = 0;
++		while(__sync_lock_test_and_set(&goal->goal_lock, 1));
++		if (measures->global.time)
++			hr = __hrm_compute_hr(measures->global.count,
++							measures->global.time);
++		__sync_lock_release(&goal->goal_lock);
++
++		goto exit;
++	}
++
++	while(__sync_lock_test_and_set(&goal->goal_lock, 1));
++	*window_size = goal->window_size[key - 1];
++	if (*window_size != 0 && measures->window[key - 1].time)
++		hr = __hrm_compute_hr(measures->window[key - 1].count,
++					measures->window[key - 1].time);
++	else
++		*window_size = HRM_MAX_WINDOW_SIZE;
++	__sync_lock_release(&goal->goal_lock);
++
++exit:
++	return hr;
++
++}
++
++u64 hrm_get_min_heart_rate(const struct hrm_group* group, size_t *window_size)
++{
++	struct hrm_goal *goal = NULL;
++	u64 hr = 0;
++
++	if (!group) {
++		*window_size = HRM_MAX_WINDOW_SIZE;
++		goto exit;
++	}
++
++	goal = (struct hrm_goal *)
++			HRM_GOAL_ADDR(group->measures_goal.kernel_address);
++	while(__sync_lock_test_and_set(&goal->goal_lock, 1));
++	*window_size = goal->scope;
++	hr = goal->min_heart_rate;
++	__sync_lock_release(&goal->goal_lock);
++
++exit:
++	return hr;
++}
++
++u64 hrm_get_max_heart_rate(const struct hrm_group* group, size_t *window_size)
++{
++	struct hrm_goal *goal = NULL;
++	u64 hr = 0;
++
++	if (!group) {
++		*window_size = HRM_MAX_WINDOW_SIZE;
++		goto exit;
++	}
++
++	goal = (struct hrm_goal *)
++			HRM_GOAL_ADDR(group->measures_goal.kernel_address);
++	while(__sync_lock_test_and_set(&goal->goal_lock, 1));
++	*window_size = goal->scope;
++	hr = goal->max_heart_rate;
++	__sync_lock_release(&goal->goal_lock);
++
++exit:
++	return hr;
++}
++
+diff --git a/tools/libhrm/.gitignore b/tools/libhrm/.gitignore
+new file mode 100644
+index 0000000..663a072
+--- /dev/null
++++ b/tools/libhrm/.gitignore
+@@ -0,0 +1,5 @@
++tags
++producer
++consumer
++config.h
++
+diff --git a/tools/libhrm/Makefile b/tools/libhrm/Makefile
+new file mode 100644
+index 0000000..0cbd99a
+--- /dev/null
++++ b/tools/libhrm/Makefile
+@@ -0,0 +1,23 @@
++.PHONY: libhrm.a producer consumer
++
++all: libhrm.a
++
++libhrm.a: hrm.h hrm.c
++	gcc -std=gnu99 -pedantic -Wall -Wextra -c -o hrm.o hrm.c -I.
++	ar crs libhrm.a hrm.o
++	ranlib libhrm.a
++
++dist: producer consumer
++
++producer: producer.c libhrm.a
++	gcc -std=gnu99 -pedantic -Wall -Wextra -ggdb -o producer producer.c -I. -L. -lhrm -lpthread -lrt
++
++consumer: consumer.c libhrm.a
++	gcc -std=gnu99 -pedantic -Wall -Wextra -ggdb -o consumer consumer.c -I. -L. -lhrm
++
++clean:
++	rm -f hrm.o libhrm.a config.h
++
++distclean: clean
++	rm -f producer consumer
++
+diff --git a/tools/libhrm/configure b/tools/libhrm/configure
+new file mode 100755
+index 0000000..0f35eca
+--- /dev/null
++++ b/tools/libhrm/configure
+@@ -0,0 +1,35 @@
++#!/bin/bash
++
++HDR_DIR=/usr/include/linux
++HRM_H=hrm.h
++CONFIG_HRM_MAX_WINDOW_SIZE=CONFIG_HRM_MAX_WINDOW_SIZE
++WINDOW_ORDER=`zcat /proc/config.gz | grep ${CONFIG_HRM_MAX_WINDOW_SIZE}`
++WINDOW_ORDER=${WINDOW_ORDER#*=}
++CONFIG_H=config.h
++
++# Cleanup possible cruft
++rm -rf config.h
++
++# Check linux headers
++if [ ! -f ${HDR_DIR}/${HRM_H} ]
++then
++	echo	"Error: ${HRM_H} not found in ${HDR_DIR}."
++	echo	"Please make sure that the headers of the appropriate version of a "\
++		"HRM-enabled kernel are installed."
++	exit -1
++fi
++
++# Check values
++if [ -e ${WINDOW_ORDER} ]
++then
++	echo 	"Error: kernel option ${CONFIG_HRM_MAX_WINDOW_SIZE} "\
++		"not found in /proc/config.gz."
++	echo	"Please, make sure you are running the appropriate version of a "\
++		"HRM-enabled kernel."
++	exit -1
++fi
++
++echo "#define HRM_MAX_WINDOW_SIZE (1 << ${WINDOW_ORDER})" >> ${CONFIG_H}
++
++echo "" >> ${CONFIG_H}
++
+diff --git a/tools/libhrm/consumer.c b/tools/libhrm/consumer.c
+new file mode 100644
+index 0000000..9083289
+--- /dev/null
++++ b/tools/libhrm/consumer.c
+@@ -0,0 +1,74 @@
++#include <getopt.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <string.h>
++#include <errno.h>
++
++#include <hrm.h>
++
++int main(int argc, char *argv[])
++{
++	int opt;
++	int gid = 1;
++	int period = 1000;
++	hrm_t monitor;
++	char *t;
++	size_t ws[HRM_MAX_WINDOWS];
++	int wn = 0;
++	pid_t tids[64];
++
++	while ((opt = getopt(argc, argv, "g:p:w:")) != -1) {
++		switch (opt) {
++		case 'g':
++			gid = strtol(optarg, NULL, 10);
++			break;
++		case 'p':
++			period = strtol(optarg, NULL, 10);
++			break;
++		case 'w':
++			t = strtok(optarg, ",");
++			for (wn = 0; wn < HRM_MAX_WINDOWS && t; wn++) {
++				ws[wn] = strtol(t, NULL, 10);
++				t = strtok(NULL, ",");
++			}
++			break;
++		default:
++			return -1;
++		}
++	}
++
++	hrm_attach(&monitor, gid, true);
++	for (int i = 0; i < wn; i++)
++		hrm_add_window(&monitor, ws[i]);
++
++	while (1) {
++		hrm_get_tids(&monitor, tids, 64);
++		printf("group %d tids:", gid);
++		for (int i = 0; tids[i]; i++)
++			printf(" %d", (int) tids[i]);
++		printf("\n");
++		printf("min heart rate: %f\n", hrm_get_min_heart_rate(&monitor, ws));
++		printf("max heart rate: %f\n", hrm_get_max_heart_rate(&monitor, ws));
++		printf("goal scope: %zu\n", *ws);
++		printf("\tglobal heart rate: %f\n", hrm_get_heart_rate(&monitor, ws, 0));
++
++		printf("%d MA are available:\n",
++					hrm_get_windows_number(&monitor));
++		for (int i = 1; i <= HRM_MAX_WINDOWS; i++) {
++			double hr = hrm_get_heart_rate(&monitor, ws, i);
++			if (*ws != HRM_MAX_WINDOW_SIZE) {
++				printf( "\twindow %d:\n"
++					"\t\twindow heart rate: %f\n", i, hr);
++				printf("\t\tsize : %zu [timer periods]\n", *ws);
++			}
++		}
++		printf("\n");
++
++		usleep(period * 1000);
++	}
++
++	return 0;
++}
++
+diff --git a/tools/libhrm/hrm.c b/tools/libhrm/hrm.c
+new file mode 100644
+index 0000000..652345c
+--- /dev/null
++++ b/tools/libhrm/hrm.c
+@@ -0,0 +1,472 @@
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <sys/types.h>
++#include <unistd.h>
++#include <string.h>
++
++#include <hrm.h>
++#include <linux/hrm.h>
++
++int hrm_attach(hrm_t *monitor, int gid, bool consumer)
++{
++	int retval = -1;
++	int tid;
++	long page_size;
++	char file[256];
++	FILE *group_fp;
++	FILE *counter_fp;
++	FILE *measures_goal_fp;
++	int counter_fd;
++	int measures_goal_fd;
++	unsigned long counter_address;
++	unsigned long measures_address;
++	unsigned long goal_address;
++
++	if (!monitor) {
++		errno = EFAULT;
++		return -1;
++	}
++	if (gid == 0) {
++		errno = EDOM;
++		return -1;
++	}
++
++	tid = syscall(__NR_gettid);
++	page_size = sysconf(_SC_PAGESIZE);
++
++	sprintf(file, "/proc/self/task/%d/hrm_%s_group", tid,
++					consumer ? "consumer" : "producer");
++	group_fp = fopen(file, "w");
++	if (!group_fp)
++		goto fopen_group_failed;
++	setbuf(group_fp, NULL);
++	sprintf(file, "/proc/self/task/%d/hrm_%s_counter", tid,
++					consumer ? "consumer" : "producer");
++	counter_fd = open(file, O_RDWR);
++	if (counter_fd < 0)
++		goto open_counter_failed;
++	counter_fp = fopen(file, "r");
++	if (!counter_fp)
++		goto fopen_counter_failed;
++	sprintf(file, "/proc/self/task/%d/hrm_%s_measures_goal", tid,
++					consumer ? "consumer" : "producer");
++	measures_goal_fd = open(file, O_RDWR);
++	if (measures_goal_fd < 0)
++		goto open_measures_goal_failed;
++	measures_goal_fp = fopen(file, "r");
++	if (!measures_goal_fp)
++		goto fopen_measures_goal_failed;
++
++	// attach thread to group
++	if (fprintf(group_fp, "%d", gid) < 0)
++		goto fprintf_group_failed;
++	// map thread counter
++	if (mmap(NULL, (size_t) page_size, PROT_READ | (consumer ? 0 : PROT_WRITE),
++				MAP_SHARED, counter_fd, 0) == MAP_FAILED)
++		goto mmap_counter_failed;
++	fscanf(counter_fp, "%lu", &counter_address);
++	// map group statistics and goal
++	if (mmap(NULL, (size_t) page_size, PROT_READ | PROT_WRITE,
++				MAP_SHARED, measures_goal_fd, 0) == MAP_FAILED)
++		goto mmap_measures_goal_failed;
++	fscanf(measures_goal_fp, "%lu %lu", &measures_address, &goal_address);
++
++	monitor->gid = gid;
++	monitor->consumer = consumer;
++	monitor->counter = (struct hrm_counter *) counter_address;
++	monitor->measures = (struct hrm_measures *) measures_address;
++	monitor->goal = (struct hrm_goal *) goal_address;
++
++	retval = 0;
++	goto exit;
++
++mmap_measures_goal_failed:
++mmap_counter_failed:
++	fprintf(group_fp, "-%d", gid);
++exit:
++fprintf_group_failed:
++	fclose(measures_goal_fp);
++fopen_measures_goal_failed:
++	close(measures_goal_fd);
++open_measures_goal_failed:
++	fclose(counter_fp);
++fopen_counter_failed:
++	close(counter_fd);
++open_counter_failed:
++	fclose(group_fp);
++fopen_group_failed:
++	return retval;
++}
++
++int hrm_detach(hrm_t *monitor)
++{
++	int retval = -1;
++	char file[256];
++	FILE *group_fp;
++
++	if (!monitor) {
++		errno = EFAULT;
++		return -1;
++	}
++
++	// detach thread from group
++	sprintf(file, "/proc/self/task/%d/hrm_%s_group", monitor->counter->tid,
++				monitor->consumer ? "consumer" : "producer");
++	group_fp = fopen(file, "w");
++	if (!group_fp)
++		goto fopen_group_failed;
++	setbuf(group_fp, NULL);
++	if (fprintf(group_fp, "-%d", monitor->gid) < 0)
++		goto fprintf_group_failed;
++
++	retval = 0;
++
++fprintf_group_failed:
++	fclose(group_fp);
++fopen_group_failed:
++	return retval;
++}
++
++int __hrm_add_window(hrm_t *monitor, size_t window_size)
++{
++	int i;
++
++	while (__sync_lock_test_and_set(&monitor->goal->goal_lock, 1));
++	for(i = 0; i < HRM_MAX_WINDOWS; i++) {
++		if (monitor->goal->window_size[i] == window_size)
++			break;
++		if (monitor->goal->window_size[i] == 0) {
++			monitor->goal->window_size[i] = window_size;
++			break;
++		}
++	}
++	__sync_lock_release(&monitor->goal->goal_lock);
++
++	if (i == HRM_MAX_WINDOWS) {
++		errno = ENOMEM;
++		return -1;
++	}
++
++	return i + 1;
++}
++
++int hrm_add_window(hrm_t *monitor, size_t window_size)
++{
++	if (!monitor) {
++		errno = EFAULT;
++		return -1;
++	}
++
++	return __hrm_add_window(monitor, window_size);
++}
++
++int hrm_del_window(hrm_t *monitor, size_t window_size)
++{
++	int i;
++
++	if (!monitor) {
++		errno = EFAULT;
++		return -1;
++	}
++	if (monitor->consumer) {
++		errno = EPERM;
++		return -1;
++	}
++	if (window_size == 0) {
++		errno = EINVAL;
++		return -1;
++	}
++	if (window_size == monitor->goal->scope) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	while (__sync_lock_test_and_set(&monitor->goal->goal_lock, 1));
++	for(i = 0; i < HRM_MAX_WINDOWS; i++) {
++		if (monitor->goal->window_size[i] == window_size) {
++			monitor->goal->window_size[i] = 0;
++			break;
++		}
++	}
++	__sync_lock_release(&monitor->goal->goal_lock);
++
++	if (i == HRM_MAX_WINDOWS) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	return 0;
++}
++
++int hrm_set_goal(hrm_t *monitor, size_t window_size,
++			double min_heart_rate, double max_heart_rate)
++{
++	int key = -1;
++
++	if (!monitor) {
++		errno = EFAULT;
++		return -1;
++	}
++	if (monitor->consumer) {
++		errno = EPERM;
++		return -1;
++	}
++	if (max_heart_rate < min_heart_rate) {
++		errno = EDOM;
++		return -1;
++	}
++	if (window_size > HRM_MAX_WINDOW_SIZE) {
++		errno = EDOM;
++		return -1;
++	}
++
++	if (window_size > 0) {
++		key = __hrm_add_window(monitor, window_size);
++		if (key == -1)
++			return -1;
++	}
++
++	while (__sync_lock_test_and_set(&monitor->goal->goal_lock, 1));
++	monitor->goal->min_heart_rate = (uint64_t) (min_heart_rate *
++							HRM_MEASURE_SCALE);
++	monitor->goal->max_heart_rate = (uint64_t) (max_heart_rate *
++							HRM_MEASURE_SCALE);
++	monitor->goal->scope = window_size;
++	__sync_lock_release(&monitor->goal->goal_lock);
++
++	return key;
++}
++
++int hrm_unset_goal(hrm_t *monitor)
++{
++	if (!monitor) {
++		errno = EFAULT;
++		return -1;
++	}
++	if (monitor->consumer) {
++		errno = EPERM;
++		return -1;
++	}
++
++	while (__sync_lock_test_and_set(&monitor->goal->goal_lock, 1));
++	monitor->goal->min_heart_rate = 0;
++	monitor->goal->max_heart_rate = 0;
++	monitor->goal->scope = 0;
++	__sync_lock_release(&monitor->goal->goal_lock);
++
++	return 0;
++}
++
++int hrm_get_windows_number(hrm_t *monitor)
++{
++	int count = 0;
++
++	while (__sync_lock_test_and_set(&monitor->goal->goal_lock, 1));
++	for (int i = 0; i < HRM_MAX_WINDOWS - 1; i++)
++		if (monitor->goal->window_size[i])
++			count++;
++	__sync_lock_release(&monitor->goal->goal_lock);
++
++	return count;
++}
++
++size_t hrm_get_window_size(hrm_t *monitor, int key)
++{
++	if (!monitor) {
++		errno = EFAULT;
++		return HRM_MAX_WINDOW_SIZE;
++	}
++	if (key < 0 || key > HRM_MAX_WINDOWS) {
++		errno = EINVAL;
++		return HRM_MAX_WINDOW_SIZE;
++	}
++
++	if (key == 0)
++		return 0;
++
++	return monitor->goal->window_size[key - 1];
++
++}
++
++double hrm_seek_heart_rate(const hrm_t *monitor, size_t window_size, int *key)
++{
++	int i;
++	double hr = 0;
++
++	if (!monitor) {
++		errno = EFAULT;
++		*key = -1;
++		return 0;
++	}
++	if (window_size > HRM_MAX_WINDOW_SIZE) {
++		errno = EINVAL;
++		*key = -1;
++		return 0;
++	}
++
++	if (window_size == 0) {
++		*key = 0;
++		while (__sync_lock_test_and_set(&monitor->goal->goal_lock, 1));
++		if (monitor->measures->global.time)
++			hr = ((double) monitor->measures->global.count /
++				(double) monitor->measures->global.time) *
++								NSEC_PER_SEC;
++		__sync_lock_release(&monitor->goal->goal_lock);
++
++		return hr;
++	}
++
++	while (__sync_lock_test_and_set(&monitor->goal->goal_lock, 1));
++	for(i = 0; i < HRM_MAX_WINDOWS; i++)
++		if (monitor->goal->window_size[i] == window_size) {
++			*key = i + 1;
++			break;
++		}
++	if (monitor->measures->window[i].time)
++		hr = ((double) monitor->measures->window[i].count /
++			(double) monitor->measures->window[i].time) *
++								NSEC_PER_SEC;
++	__sync_lock_release(&monitor->goal->goal_lock);
++
++	if (i == HRM_MAX_WINDOWS) {
++		errno = EINVAL;
++		*key = -1;
++		return 0;
++	}
++
++	return hr;
++}
++
++double hrm_get_heart_rate(const hrm_t *monitor, size_t *window_size, int key)
++{
++	double hr = 0;
++
++	if (!monitor) {
++		errno = EFAULT;
++		*window_size = HRM_MAX_WINDOW_SIZE;
++		return 0;
++	}
++	if (key < 0 || key > HRM_MAX_WINDOWS) {
++		errno = EINVAL;
++		*window_size = HRM_MAX_WINDOW_SIZE;
++		return 0;
++	}
++
++	if (key == 0) {
++		*window_size = 0;
++		while (__sync_lock_test_and_set(&monitor->goal->goal_lock, 1));
++		if (monitor->measures->global.time)
++			hr = ((double) monitor->measures->global.count /
++				(double) monitor->measures->global.time) *
++								NSEC_PER_SEC;
++		__sync_lock_release(&monitor->goal->goal_lock);
++
++		return hr;
++	}
++
++	while (__sync_lock_test_and_set(&monitor->goal->goal_lock, 1));
++	*window_size = monitor->goal->window_size[key - 1];
++	if (!*window_size) {
++		errno = EINVAL;
++		*window_size = HRM_MAX_WINDOW_SIZE;
++	} else if (monitor->measures->window[key - 1].time)
++		hr = ((double) monitor->measures->window[key - 1].count /
++			(double) monitor->measures->window[key - 1].time) *
++								NSEC_PER_SEC;
++	__sync_lock_release(&monitor->goal->goal_lock);
++
++	return hr;
++}
++
++double
++hrm_get_min_heart_rate(const hrm_t *monitor, size_t *window_size)
++{
++	double hr;
++
++	if (!monitor) {
++		errno = EFAULT;
++		*window_size = HRM_MAX_WINDOW_SIZE;
++		return 0;
++	}
++
++	while (__sync_lock_test_and_set(&monitor->goal->goal_lock, 1));
++	*window_size = monitor->goal->scope;
++	hr = (double) monitor->goal->min_heart_rate / HRM_MEASURE_SCALE;
++	__sync_lock_release(&monitor->goal->goal_lock);
++
++	return hr;
++}
++
++double
++hrm_get_max_heart_rate(const hrm_t *monitor, size_t *window_size)
++{
++	double hr;
++
++	if (!monitor) {
++		errno = EFAULT;
++		*window_size = HRM_MAX_WINDOW_SIZE;
++		return 0;
++	}
++
++	while (__sync_lock_test_and_set(&monitor->goal->goal_lock, 1));
++	*window_size = monitor->goal->scope;
++	hr = (double) monitor->goal->max_heart_rate / HRM_MEASURE_SCALE;
++	__sync_lock_release(&monitor->goal->goal_lock);
++
++	return hr;
++}
++
++int heartbeat(hrm_t *monitor, uint64_t n)
++{
++	if (!monitor) {
++		errno = EFAULT;
++		return -1;
++	}
++	if (monitor->consumer) {
++		errno = EPERM;
++		return -1;
++	}
++
++	__sync_add_and_fetch(&monitor->counter->counter, n);
++
++	return 0;
++}
++
++int hrm_get_tids(const hrm_t *monitor, pid_t tids[], int n)
++{
++	pid_t *tids_;
++	int tids_count = 0;
++	struct hrm_counter *counter;
++
++	if (!monitor) {
++		errno = EFAULT;
++		return -1;
++	}
++	if (!monitor->consumer) {
++		errno = EPERM;
++		return -1;
++	}
++	if (tids == NULL)
++		return -1;
++
++	tids_ = (pid_t *) calloc(64, sizeof(pid_t));
++	if (tids_ == NULL)
++		return -1;
++	for (int i = 0; i < 64; i++) {
++		counter = (struct hrm_counter *)
++				((unsigned long) monitor->counter + i * 64);
++		if (counter->used)
++			tids_[tids_count++] = counter->tid;
++	}
++
++	memcpy(tids, tids_, (tids_count < n ? tids_count : n) * sizeof(pid_t));
++	tids[(tids_count < n ? tids_count : n)] = 0;
++
++	return 0;
++}
++
+diff --git a/tools/libhrm/hrm.h b/tools/libhrm/hrm.h
+new file mode 100644
+index 0000000..05d1508
+--- /dev/null
++++ b/tools/libhrm/hrm.h
+@@ -0,0 +1,56 @@
++#ifndef _HRM_H
++#define _HRM_H
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <linux/hrm.h>
++#include <config.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct hrm {
++	int gid;
++	bool consumer;
++
++	struct hrm_counter *counter;
++	struct hrm_measures *measures;
++	struct hrm_goal *goal;
++};
++
++typedef struct hrm hrm_t;
++
++int hrm_attach(hrm_t *monitor, int gid, bool consumer);
++int hrm_detach(hrm_t *monitor);
++
++int hrm_add_window(hrm_t *monitor, size_t window_size);
++int hrm_del_window(hrm_t *monitor, size_t window_size);
++
++int
++hrm_set_goal(hrm_t *monitor, size_t window_size, double min_heart_rate,
++							double max_heart_rate);
++int hrm_unset_goal(hrm_t *monitor);
++
++int hrm_get_windows_number(hrm_t *monitor);
++size_t hrm_get_window_size(hrm_t *monitor, int key);
++
++double hrm_seek_heart_rate(const hrm_t *monitor, size_t window_size, int *key);
++double hrm_get_heart_rate(const hrm_t *monitor, size_t *window_size, int key);
++
++double
++hrm_get_min_heart_rate(const hrm_t *monitor, size_t *window_size);
++double
++hrm_get_max_heart_rate(const hrm_t *monitor, size_t *window_size);
++
++int hrm_get_tids(const hrm_t *monitor, pid_t tids[], int n);
++
++int heartbeat(hrm_t *monitor, uint64_t n);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _HRM_H */
++
+diff --git a/tools/libhrm/producer.c b/tools/libhrm/producer.c
+new file mode 100644
+index 0000000..e9c3a91
+--- /dev/null
++++ b/tools/libhrm/producer.c
+@@ -0,0 +1,128 @@
++#include <getopt.h>
++#include <pthread.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <time.h>
++#include <unistd.h>
++#include <errno.h>
++
++#include <hrm.h>
++
++#define WS {10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150}
++#define MIN {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
++#define MAX {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
++
++int gid = 1;
++int threads_number = 1;
++long heartbeats_number = 1000000;
++
++int start, running;
++
++void *thread(void *arg);
++
++int
++main(int argc, char *argv[])
++{
++	int opt;
++	pthread_t *threads;
++	struct timespec tbegin;
++	struct timespec tend;
++	int windows_number = 0;
++	size_t ws[HRM_MAX_WINDOWS] = WS;
++	int min[HRM_MAX_WINDOWS] = MIN;
++	int max[HRM_MAX_WINDOWS] = MAX;
++	hrm_t monitor;
++	int i;
++
++	while ((opt = getopt(argc, argv, "g:n:t:w:")) != -1) {
++		switch (opt) {
++		case 'g':
++			gid = strtol(optarg, NULL, 10);
++			break;
++		case 'n':
++			heartbeats_number = strtol(optarg, NULL, 10);
++			break;
++		case 't':
++			threads_number = strtol(optarg, NULL, 10);
++			break;
++		case 'w':
++			windows_number = strtol(optarg, NULL, 10);
++			break;
++		default:
++			return -1;
++		}
++	}
++	if (threads_number < 1 || heartbeats_number < 1) {
++		return -1;
++	}
++
++	threads = (pthread_t *) malloc(sizeof(pthread_t) * threads_number);
++	for (int i = 0; i < threads_number; i++)
++		pthread_create(&threads[i], NULL, thread, NULL);
++	clock_gettime(CLOCK_MONOTONIC, &tbegin);
++
++	hrm_attach(&monitor, gid, false);
++	printf("Attached to gid %d\n", gid);
++	for (i = 0; i < windows_number; i++)
++		hrm_set_goal(&monitor, ws[i], min[i], max[i]);
++
++	windows_number = hrm_get_windows_number(&monitor);
++	printf("\t%d MA set", windows_number);
++	if (windows_number) {
++		printf(" of sizes: ");
++		for (int i = 1; i <= HRM_MAX_WINDOWS; i++) {
++			*ws = hrm_get_window_size(&monitor, i);
++			if (*ws > 0 && *ws < HRM_MAX_WINDOW_SIZE)
++				printf("%zu ", *ws);
++		}
++		printf("[hrtimer periods]\n");
++	} else
++		printf(".\n");
++
++	printf("\tmin heart rate: %f\n", hrm_get_min_heart_rate(&monitor, ws));
++	printf("\tmax heart rate: %f\n", hrm_get_max_heart_rate(&monitor, ws));
++	printf("\tgoal scope: %zu\n", *ws);
++	start = 1;
++
++	running = 0;
++	while(!running);
++	hrm_detach(&monitor);
++
++	for (i = 0; i < threads_number; i++)
++		pthread_join(threads[i], NULL);
++
++	hrm_unset_goal(&monitor);
++	for (i = 1; i <= HRM_MAX_WINDOWS; i++) {
++		hrm_get_heart_rate(&monitor, ws, i);
++		if (ws[0] < HRM_MAX_WINDOW_SIZE)
++			hrm_del_window(&monitor, ws[0]);
++	}
++
++	clock_gettime(CLOCK_MONOTONIC, &tend);
++	printf("%lu\n", (unsigned long) ((tend.tv_sec - tbegin.tv_sec) * 1000000000 + (tend.tv_nsec - tbegin.tv_nsec)));
++
++	return 0;
++}
++
++void *
++thread(void *arg)
++{
++	hrm_t monitor;
++
++	while (!start);
++	hrm_attach(&monitor, gid, false);
++	running = 1;
++
++	for (long i = 0; i < heartbeats_number / threads_number; i++) {
++		usleep(1500000);
++		heartbeat(&monitor, 1);
++	}
++
++	hrm_detach(&monitor);
++
++	pthread_exit(NULL);
++
++	return arg;
++}
++

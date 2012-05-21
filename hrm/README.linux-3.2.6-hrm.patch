@@ -1,0 +1,16 @@
+The patch contains the diff from vanilla linux-3.2.6 to the latest version of
+HRM backported from the AcOS repository (now based on linux-3.3.6).
+I tried to apply the patch to a vanilla 3.2.6 kernel and to compile, install,
+boot, and try out HRM and all seems to work.
+You can use tha patch to enable HRM in your kernel (it should apply with, at
+most, few conflicts if you change something relevant) and use HRM to gather
+execution data.
+The HRM-related userspace tools are located under /tools/libhrm.
+Contact me in case you need help in using HRM or need instrumented benchmarks
+for the experimental evaluation of your work (we have some of the apps of the
+PARSEC 2.1 suite already instrumented).
+
+Ciao.
+
+davide
+
