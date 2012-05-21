@@ -1311,6 +1311,86 @@ source "arch/Kconfig"
 
 endmenu		# General setup
 
+menu "Autonomic Operating System"
+
+menu "Monitors"
+
+config HRM
+	depends on PROC_FS
+	depends on IKCONFIG_PROC
+	bool "Enable Heart Rate Monitor"
+	default n
+choice
+	depends on HRM
+	prompt "Group size"
+	default HRM_GROUP_ORDER_0
+	help
+		Select group size.
+
+config HRM_GROUP_ORDER_0
+	bool "64 tasks"
+config HRM_GROUP_ORDER_1
+	bool "128 tasks"
+config HRM_GROUP_ORDER_2
+	bool "256 tasks"
+config HRM_GROUP_ORDER_3
+	bool "512 tasks"
+config HRM_GROUP_ORDER_4
+	bool "1024 tasks"
+
+endchoice
+
+config HRM_GROUP_ORDER
+	depends on HRM
+	int
+	default 0 if HRM_GROUP_ORDER_0
+	default 1 if HRM_GROUP_ORDER_1
+	default 2 if HRM_GROUP_ORDER_2
+	default 3 if HRM_GROUP_ORDER_3
+	default 4 if HRM_GROUP_ORDER_4
+
+config HRM_MAX_WINDOW_SIZE
+	depends on HRM
+	int "Window size (7 => 128, 8 => 256, ..., 11 => 2048)."
+	range 7 11
+	default 10
+	help
+		Select window size as a power of 2.
+		Examples:
+			 7 =>  128
+			 8 =>  256
+			 9 =>  512
+			10 => 1024 
+			11 => 2048
+
+choice
+	depends on HRM
+	prompt "Timer period"
+	default HRM_TIMER_PERIOD_100
+
+config HRM_TIMER_PERIOD_1
+	bool "1 ms"
+config HRM_TIMER_PERIOD_10
+	bool "10 ms"
+config HRM_TIMER_PERIOD_100
+	bool "100 ms"
+config HRM_TIMER_PERIOD_1000
+	bool "1000 ms"
+
+endchoice
+
+config HRM_TIMER_PERIOD
+	depends on HRM
+	int
+	default 1000 if HRM_TIMER_PERIOD_1
+	default 10000 if HRM_TIMER_PERIOD_10
+	default 100000 if HRM_TIMER_PERIOD_100
+	default 1000000 if HRM_TIMER_PERIOD_1000
+
+endmenu
+
+endmenu
+
 config HAVE_GENERIC_DMA_COHERENT
 	bool
 	default n

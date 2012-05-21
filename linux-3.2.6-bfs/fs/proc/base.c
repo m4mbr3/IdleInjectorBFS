@@ -88,6 +88,10 @@
 #endif
 #include "internal.h"
 
+#ifdef CONFIG_HRM
+#include <linux/hrm.h>
+#endif
+
 /* NOTE:
  *	Implementing inode permission operations in /proc is almost
  *	certainly an error.  Permission checks need to happen during
@@ -3038,6 +3042,42 @@ out_no_task:
 	return 0;
 }
 
+#ifdef CONFIG_HRM
+static const struct file_operations proc_hrm_producer_group_ops = {
+	.llseek = generic_file_llseek,
+	.write = hrm_producer_group_write,
+};
+
+static const struct file_operations proc_hrm_consumer_group_ops = {
+	.llseek = generic_file_llseek,
+	.write = hrm_consumer_group_write,
+};
+
+static const struct file_operations proc_hrm_producer_counter_ops = {
+	.llseek = generic_file_llseek,
+	.read = hrm_producer_counter_read,
+	.mmap = hrm_producer_counter_mmap,
+};
+
+static const struct file_operations proc_hrm_consumer_counter_ops = {
+	.llseek = generic_file_llseek,
+	.read = hrm_consumer_counter_read,
+	.mmap = hrm_consumer_counter_mmap,
+};
+
+static const struct file_operations proc_hrm_producer_measures_goal_ops = {
+	.llseek = generic_file_llseek,
+	.read = hrm_producer_measures_goal_read,
+	.mmap = hrm_producer_measures_goal_mmap,
+};
+
+static const struct file_operations proc_hrm_consumer_measures_goal_ops = {
+	.llseek = generic_file_llseek,
+	.read = hrm_consumer_measures_goal_read,
+	.mmap = hrm_consumer_measures_goal_mmap,
+};
+#endif
+
 /*
  * Tasks
  */
@@ -3111,6 +3151,14 @@ static const struct pid_entry tid_base_stuff[] = {
 #endif
 #ifdef CONFIG_HARDWALL
 	INF("hardwall",   S_IRUGO, proc_pid_hardwall),
+#endif
+#ifdef CONFIG_HRM
+	REG("hrm_producer_group", S_IRUSR | S_IWUSR, proc_hrm_producer_group_ops),
+	REG("hrm_consumer_group", S_IRUSR | S_IWUSR, proc_hrm_consumer_group_ops),
+	REG("hrm_producer_counter", S_IRUSR | S_IWUSR, proc_hrm_producer_counter_ops),
+	REG("hrm_consumer_counter", S_IRUSR | S_IWUSR, proc_hrm_consumer_counter_ops),
+	REG("hrm_producer_measures_goal", S_IRUSR | S_IWUSR, proc_hrm_producer_measures_goal_ops),
+	REG("hrm_consumer_measures_goal", S_IRUSR | S_IWUSR, proc_hrm_consumer_measures_goal_ops)
 #endif
 };
 

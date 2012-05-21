@@ -1,0 +1,35 @@
+#!/bin/bash
+
+HDR_DIR=/usr/include/linux
+HRM_H=hrm.h
+CONFIG_HRM_MAX_WINDOW_SIZE=CONFIG_HRM_MAX_WINDOW_SIZE
+WINDOW_ORDER=`zcat /proc/config.gz | grep ${CONFIG_HRM_MAX_WINDOW_SIZE}`
+WINDOW_ORDER=${WINDOW_ORDER#*=}
+CONFIG_H=config.h
+
+# Cleanup possible cruft
+rm -rf config.h
+
+# Check linux headers
+if [ ! -f ${HDR_DIR}/${HRM_H} ]
+then
+	echo	"Error: ${HRM_H} not found in ${HDR_DIR}."
+	echo	"Please make sure that the headers of the appropriate version of a "\
+		"HRM-enabled kernel are installed."
+	exit -1
+fi
+
+# Check values
+if [ -e ${WINDOW_ORDER} ]
+then
+	echo 	"Error: kernel option ${CONFIG_HRM_MAX_WINDOW_SIZE} "\
+		"not found in /proc/config.gz."
+	echo	"Please, make sure you are running the appropriate version of a "\
+		"HRM-enabled kernel."
+	exit -1
+fi
+
+echo "#define HRM_MAX_WINDOW_SIZE (1 << ${WINDOW_ORDER})" >> ${CONFIG_H}
+
+echo "" >> ${CONFIG_H}
+

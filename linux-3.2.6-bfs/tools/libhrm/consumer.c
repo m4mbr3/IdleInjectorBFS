@@ -1,0 +1,74 @@
+#include <getopt.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <errno.h>
+
+#include <hrm.h>
+
+int main(int argc, char *argv[])
+{
+	int opt;
+	int gid = 1;
+	int period = 1000;
+	hrm_t monitor;
+	char *t;
+	size_t ws[HRM_MAX_WINDOWS];
+	int wn = 0;
+	pid_t tids[64];
+
+	while ((opt = getopt(argc, argv, "g:p:w:")) != -1) {
+		switch (opt) {
+		case 'g':
+			gid = strtol(optarg, NULL, 10);
+			break;
+		case 'p':
+			period = strtol(optarg, NULL, 10);
+			break;
+		case 'w':
+			t = strtok(optarg, ",");
+			for (wn = 0; wn < HRM_MAX_WINDOWS && t; wn++) {
+				ws[wn] = strtol(t, NULL, 10);
+				t = strtok(NULL, ",");
+			}
+			break;
+		default:
+			return -1;
+		}
+	}
+
+	hrm_attach(&monitor, gid, true);
+	for (int i = 0; i < wn; i++)
+		hrm_add_window(&monitor, ws[i]);
+
+	while (1) {
+		hrm_get_tids(&monitor, tids, 64);
+		printf("group %d tids:", gid);
+		for (int i = 0; tids[i]; i++)
+			printf(" %d", (int) tids[i]);
+		printf("\n");
+		printf("min heart rate: %f\n", hrm_get_min_heart_rate(&monitor, ws));
+		printf("max heart rate: %f\n", hrm_get_max_heart_rate(&monitor, ws));
+		printf("goal scope: %zu\n", *ws);
+		printf("\tglobal heart rate: %f\n", hrm_get_heart_rate(&monitor, ws, 0));
+
+		printf("%d MA are available:\n",
+					hrm_get_windows_number(&monitor));
+		for (int i = 1; i <= HRM_MAX_WINDOWS; i++) {
+			double hr = hrm_get_heart_rate(&monitor, ws, i);
+			if (*ws != HRM_MAX_WINDOW_SIZE) {
+				printf( "\twindow %d:\n"
+					"\t\twindow heart rate: %f\n", i, hr);
+				printf("\t\tsize : %zu [timer periods]\n", *ws);
+			}
+		}
+		printf("\n");
+
+		usleep(period * 1000);
+	}
+
+	return 0;
+}
+

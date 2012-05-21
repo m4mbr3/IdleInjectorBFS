@@ -76,6 +76,10 @@
 
 #include <trace/events/sched.h>
 
+#ifdef CONFIG_HRM
+#include <linux/hrm.h>
+#endif
+
 /*
  * Protected counters by write_lock_irq(&tasklist_lock)
  */
@@ -1366,6 +1370,11 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 		attach_pid(p, PIDTYPE_PID, pid);
 		nr_threads++;
 	}
+
+#ifdef CONFIG_HRM
+	INIT_LIST_HEAD(&p->hrm_producers);
+	INIT_LIST_HEAD(&p->hrm_consumers);
+#endif
 
 	total_forks++;
 	spin_unlock(&current->sighand->siglock);

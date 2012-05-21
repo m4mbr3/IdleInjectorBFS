@@ -57,6 +57,10 @@
 #include <asm/pgtable.h>
 #include <asm/mmu_context.h>
 
+#ifdef CONFIG_HRM
+#include <linux/hrm.h>
+#endif
+
 static void exit_mm(struct task_struct * tsk);
 
 static void __unhash_process(struct task_struct *p, bool group_dead)
@@ -914,6 +918,13 @@ NORET_TYPE void do_exit(long code)
 	ptrace_event(PTRACE_EVENT_EXIT, code);
 
 	validate_creds_for_do_exit(tsk);
+
+#ifdef CONFIG_HRM
+	if (hrm_producer_task_enabled(tsk))
+		hrm_delete_producer_task_from_all_groups(tsk);
+	if (hrm_consumer_task_enabled(tsk))
+		hrm_delete_consumer_task_from_all_groups(tsk);
+#endif
 
 	/*
 	 * We're taking recursive faults here in do_exit. Safest is to just

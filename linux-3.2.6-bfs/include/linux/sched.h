@@ -101,6 +101,10 @@ struct sched_param {
 
 #include <asm/processor.h>
 
+#ifdef CONFIG_HRM
+#include <linux/hrm.h>
+#endif
+
 struct exec_domain;
 struct futex_pi_state;
 struct robust_list_head;
@@ -1595,6 +1599,10 @@ struct task_struct {
 #endif
 #ifdef CONFIG_HAVE_HW_BREAKPOINT
 	atomic_t ptrace_bp_refcnt;
+#endif
+#ifdef CONFIG_HRM
+	struct list_head hrm_producers;
+	struct list_head hrm_consumers;
 #endif
 };
 

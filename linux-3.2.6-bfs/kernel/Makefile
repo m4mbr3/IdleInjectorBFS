@@ -13,6 +13,8 @@ obj-y     = sched.o fork.o exec_domain.o panic.o printk.o \
 	    async.o range.o
 obj-y += groups.o
 
+obj-$(CONFIG_HRM) += hrm.o
+
 ifdef CONFIG_FUNCTION_TRACER
 # Do not trace debug files and internal ftrace files
 CFLAGS_REMOVE_lockdep.o = -pg
