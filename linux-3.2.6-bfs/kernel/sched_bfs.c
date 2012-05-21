@@ -269,7 +269,10 @@ static int proc_write_idlePid(struct file *file,
 		printk("BFSIDLEINJ: Case empty list\n");
 		if(pid_new->pid > 0 ){
 			spin_lock(&lst_write_lock);
-			list_add_tail_rcu(&pid_new->list, &param.pidList->list);
+			if(pid_new->type == 'p')
+				list_add_tail_rcu(&pid_new->list, &param.pidList->list);
+			else
+				list_add_rcu(&pid_new->list, &param.pidList->list);
 			spin_unlock(&lst_write_lock);
 			printk("BFSIDLEINJ: First Element Added\n");
 			goto free;
@@ -303,9 +306,12 @@ static int proc_write_idlePid(struct file *file,
 	}
 	if(pid_new->pid >0){
 		spin_lock(&lst_write_lock);
-	 	list_add_tail_rcu(&pid_new->list, &param.pidList->list);
+		if(pid_new->type == 'p')
+		 	list_add_tail_rcu(&pid_new->list, &param.pidList->list);
+		else
+			list_add_rcu(&pid_new->list, &param.pidList->list);
 		spin_unlock(&lst_write_lock);
-		printk("BFSIDLEINJ: Added one element at the end of the list\n");
+		printk("BFSIDLEINJ: Added one element to the list\n");
 		goto free;
 	}
 	else{
@@ -3265,8 +3271,8 @@ retry:
 		if(!list_empty(&param.pidList->list)){
 			struct pid_list *f;
 				list_for_each_entry_rcu(f, &param.pidList->list,list){
-					if(edt->tgid == f->pid && f->type == 'p' ||
-					   edt->pid == f->pid && f->type == 't') {
+					if(((edt->tgid == f->pid) && (f->type == 'p')) ||
+					  (( edt->pid == f->pid) && (f->type == 't'))) {
 							f->times++;
 							if(f->times == f->max_load) {
 								f->times = 0;
