@@ -147,7 +147,7 @@ int idle_cycles_offset = 0; /*Variable used as bound of global_rate. its value c
  * parameters of the idle injection*/
 struct pid_list{
 	struct  list_head list; /*pointer to the list*/
-	int pid; /*pid or tid to check and limit*/
+	int pid; /*pid or tid to check and limit */
 	int max_load; /*every max_load we have an injection of idle instead my process or thread*/
 	int times; /*count how many times process with that pid is scheduled*/
 	char type; /*flag that says if check the pid or tid of the process scheduled*/
