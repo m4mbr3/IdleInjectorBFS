@@ -629,8 +629,13 @@ unsigned long __hrm_find_group_memory_map(struct task_struct *task, struct hrm_m
 
 static inline u64 __hrm_compute_hr(u64 count, u64 time)
 {
-	return (count * USEC_PER_SEC) / (time / MSEC_PER_SEC / HRM_MEASURE_SCALE);
+	u64 scaled_time, scaled_count;
 
+	scaled_count = count * USEC_PER_SEC;
+	scaled_time = div64_u64(MSEC_PER_SEC, HRM_MEASURE_SCALE);
+	scaled_time = div64_u64(time, scaled_time);
+
+	return div64_u64(scaled_count, scaled_time);
 }
 
 u64
