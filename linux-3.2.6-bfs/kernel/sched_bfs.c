@@ -171,7 +171,8 @@ static int proc_read_idleGlobal(char *page, char **start,
 	int len;
 
 	spin_lock(&global_write_lock);
-	len = sprintf(page, "Global_rate = %d\n", param.global_rate);
+	len = sprintf(page, "Global_rate = %d, rate = %d\n", param.global_rate,idle_cycles_offset);
+	idle_cycles_offset = 0;
 	spin_unlock(&global_write_lock);
 	return len;
 }
@@ -210,8 +211,9 @@ static int proc_write_idleGlobal(struct file *file,
 		return -EFAULT;
 	}
 	spin_lock(&global_write_lock);
-	if((int)simple_strtol(buffer_ker, NULL, 10) >= 5)
+	if((int)simple_strtol(buffer_ker, NULL, 10) >= 5){
 		param.global_rate = (int) simple_strtol(buffer_ker, NULL, 10);
+	}	
 	spin_unlock(&global_write_lock);
 	printk("BFSIDLEINJ: idleGlobal has been written to %d\n",param.global_rate);
 	kfree(buffer_ker);
