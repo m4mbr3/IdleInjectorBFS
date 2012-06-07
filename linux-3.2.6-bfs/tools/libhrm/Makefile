@@ -7,13 +7,16 @@ libhrm.a: hrm.h hrm.c
 	ar crs libhrm.a hrm.o
 	ranlib libhrm.a
 
+temperature:
+	gcc -std=gnu99 -pedantic -Wall -Wextra  -lsensors -o test_temperature test_temperature.c 
+
 dist: producer consumer
 
 producer: producer.c libhrm.a
 	gcc -std=gnu99 -pedantic -Wall -Wextra -ggdb -o producer producer.c -I. -L. -lhrm -lpthread -lrt
 
 consumer: consumer.c libhrm.a
-	gcc -std=gnu99 -pedantic -Wall -Wextra -ggdb -o consumer consumer.c -I. -L. -lhrm
+	gcc -std=gnu99 -pedantic -Wall -Wextra -ggdb -o consumer consumer.c -I. -L. -lhrm -lrt -lpthread  
 
 clean:
 	rm -f hrm.o libhrm.a config.h

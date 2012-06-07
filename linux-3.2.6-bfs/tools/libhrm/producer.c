@@ -109,14 +109,26 @@ void *
 thread(void *arg)
 {
 	hrm_t monitor;
-
+	double a = 10;
+	double  b = 40;
+	double c = 12;
 	while (!start);
 	hrm_attach(&monitor, gid, false);
 	running = 1;
 
 	for (long i = 0; i < heartbeats_number / threads_number; i++) {
-		usleep(1500000);
+		a = ((a*10)/(b*c))/50;
+		b = ((b*b)*c*a*10)/(a*b);
+		c = 10 *a *b*c+c;
+		a = a/b;
+		a = a/b;
+		a = c/b;
+		b = 10/c;
 		heartbeat(&monitor, 1);
+		a = 10;
+		b = 40;
+		c = 12;
+		usleep(10);
 	}
 
 	hrm_detach(&monitor);
