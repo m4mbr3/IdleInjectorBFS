@@ -325,23 +325,55 @@ int main(int argc, char *argv[])
 	     
 		if ((val=do_the_real_work(NULL, &err)) != -1)	
 		{		
-				if (val >61){ 
+			
+				if (val > 75){
+					if(level != 4){
+						system("echo  4 > /proc/schedidle/sched_global");
+						level= 4;
+					}
+					else{
+						printf ("stable 4\n");
+					}
+				}
+				else if (val > 68){
+					if(level != 5){
+						system("echo 5 > /proc/schedidle/sched_global");
+						level = 5;
+					}
+					else{
+						printf ("stable 5\n");
+					}
+
+				}
+				else if (val >61){ 
 					if(level != 7){
 						system("echo 7 > /proc/schedidle/sched_global");
 						level = 7;
 					}
+					else{
+						printf ("stable 7\n");
+					}
+
 				}	
 				else if (val > 58){
 					if(level != 9){
 						system("echo 9 > /proc/schedidle/sched_global");
 						level = 9;
+					}	
+					else{
+						printf ("stable 9\n");
 					}
+
 				}
 				else if (val < 55){
 					if (level != 2000){
 				    		system("echo 2000 > /proc/schedidle/sched_global");
 						level = 2000;
 					}
+					else{
+						printf ("stable 2000\n");
+					}
+
 				}	
 				sleep(2);	
 		}
