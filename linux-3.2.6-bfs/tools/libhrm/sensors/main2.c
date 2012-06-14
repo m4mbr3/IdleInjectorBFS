@@ -306,7 +306,6 @@ int main(int argc, char *argv[])
 	if (err)
 		exit(err);
 	double val=0;
-	int level = 2000;
 	FILE *fp;
 	/* build the degrees string */
 	set_degstr();
@@ -323,9 +322,9 @@ int main(int argc, char *argv[])
 			if( (fp = fopen("temperature.log","a+"))!=NULL)
 			{
 				clock_gettime(CLOCK_MONOTONIC, &t1);
-				fprintf(fp, "\ntime= %lld s ---- temp = %lf",(timespec_to_ns(&t1)-timespec_to_ns(&t2))/1000000000,val);
+				fprintf(fp, "\ntime= %lf s ---- temp = %lf",(double)(timespec_to_ns(&t1)-timespec_to_ns(&t2))/1000000000,val);
 				fclose(fp);
-				sleep(2);	
+				usleep(100000);	
 			}
 		}
 		else{
