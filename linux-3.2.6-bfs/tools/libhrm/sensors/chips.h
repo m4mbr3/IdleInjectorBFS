@@ -49,5 +49,5 @@ struct sensor_subfeature_list {
 
 void print_chip_raw(const sensors_chip_name *name);
 void print_chip(const sensors_chip_name *name);
-double get_chip_temp_avg(const sensors_chip_name *name);
+double get_chip_temp_avg(const sensors_chip_name *name, int number);
 #endif /* def PROG_SENSORS_CHIPS_H */

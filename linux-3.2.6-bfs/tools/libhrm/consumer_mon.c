@@ -57,6 +57,7 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < wn; i++)
 		hrm_add_window(&monitor, ws[i]);
 	clock_gettime(CLOCK_MONOTONIC, &t2);
+	int level = -1;
 	while (1) {
 		hrm_get_tids(&monitor, tids, 64);
 	/*	printf("group %d tids:", gid);
@@ -100,8 +101,36 @@ int main(int argc, char *argv[])
 			fprintf(fp, "\tglobal heart rate: %f\n", hrm_get_heart_rate(&monitor,ws, 0));
 			fprintf(fp, "%d MA are available:\n", 
 							hrm_get_windows_number(&monitor));
+			
 			for (int i = 1; i <= HRM_MAX_WINDOWS; i++) {
 				double hr = hrm_get_heart_rate(&monitor, ws, i);
+			if (time > 100 ){
+				if( hr  > 10000000 ){
+					if (level != 10){
+						system ("echo 5 > /proc/schedidle/sched_global");
+						level = 10;
+						printf ("\nlevel : %d\n" , level);
+					}
+				}
+				else if ( hr > 7000000 ){
+					if (level != 7){
+						system ("echo 6 > /proc/schedidle/sched_global");
+						level = 7;	printf ("\nlevel : %d\n" , level);
+					}
+				}
+				else if ( hr > 4000000 ){
+					if (level != 4){
+						system ("echo 7 > /proc/schedidle/sched_global");
+						level = 4;	printf ("\nlevel : %d\n" , level);
+					}		
+				}
+				else if ( hr > 1000000 ){
+					if (level != 1){
+						system ("echo 8 > /proc/schedidle/sched_global");
+						level = 1;	printf ("\nlevel : %d\n" , level);
+					}
+				}
+			}
 				if (*ws != HRM_MAX_WINDOW_SIZE) {
 				    if(gid == 1){
 					if ( i == 1 ){
@@ -156,7 +185,7 @@ int main(int argc, char *argv[])
 					}
 
 				}
-				}
+			    }
 			}
 			fprintf(fp,"\n");
 			fclose(fp);

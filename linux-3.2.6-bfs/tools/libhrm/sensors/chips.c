@@ -787,7 +787,7 @@ static void print_chip_intrusion(const sensors_chip_name *name,
 	}
 	free(label);
 }
-double get_chip_temp_avg(const sensors_chip_name *name)
+double get_chip_temp_avg(const sensors_chip_name *name, int number)
 {
 	const sensors_feature *feature;
 	int i, label_size;
@@ -799,15 +799,16 @@ double get_chip_temp_avg(const sensors_chip_name *name)
 	while ((feature = sensors_get_features(name, &i))) {
 		switch (feature->type) {
 		case SENSORS_FEATURE_TEMP:
-			val += get_val_temp(name, feature, label_size);
+			if(n == number){
+				val = get_val_temp(name, feature, label_size);
+			}
 			n++;
 			break;
 		default:
 			continue;
 		}
 	}
-	double result= val/n;
-	return result;
+	return val;
 
 
 }

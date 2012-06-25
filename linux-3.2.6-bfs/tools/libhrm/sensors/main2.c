@@ -163,9 +163,9 @@ static const char *sprintf_chip_name(const sensors_chip_name *name)
 	return buf;
 }
 
-static double do_a_print(const sensors_chip_name *name)
+static double do_a_print(const sensors_chip_name *name, int number)
 {
-	return get_chip_temp_avg(name);
+	return get_chip_temp_avg(name, number);
 }
 
 /* returns 1 on error */
@@ -193,25 +193,25 @@ static int do_a_set(const sensors_chip_name *name)
 }
 
 /* returns number of chips found */
-static double do_the_real_work(const sensors_chip_name *match, int *err)
+static double do_the_real_work(const sensors_chip_name *match, int *err, int number)
 {
 	const sensors_chip_name *chip;
 	int chip_nr;
 	double val=0;
 	double n=0;
 	chip_nr = 0;
+	chip =  sensors_get_detected_chips(match, &chip_nr);
 	while ((chip = sensors_get_detected_chips(match, &chip_nr))) {
 		if (do_sets) {
 			if (do_a_set(chip))
 				*err = 1;
 		} else{
-			val = val+get_chip_temp_avg(chip);
-			n++;
+			val = get_chip_temp_avg(chip, number);
 
 		}
 		
 	}
-	return val/n;
+	return val;
 }
 
 /* List the buses in a format suitable for sensors.conf. We only list
@@ -317,15 +317,23 @@ int main(int argc, char *argv[])
 	     clock_gettime(CLOCK_MONOTONIC, &t2);
 	     while(1){	
 	     
-		if ((val=do_the_real_work(NULL, &err)) != -1)	
+		if ((val=do_the_real_work(NULL, &err,0)) != -1)	
 		{		
 			if( (fp = fopen("temperature.log","a+"))!=NULL)
 			{
 				clock_gettime(CLOCK_MONOTONIC, &t1);
 				fprintf(fp, "\ntime= %lf s ---- temp = %lf",(double)(timespec_to_ns(&t1)-timespec_to_ns(&t2))/1000000000,val);
 				fclose(fp);
-				usleep(100000);	
+			
 			}
+			if ( (fp = fopen("temperature2.log","a+")) != NULL)
+			{
+				clock_gettime(CLOCK_MONOTONIC, &t1);
+				val = do_the_real_work(NULL, &err, 1);
+				fprintf(fp, "\ntime= %lf s ---- temp = %lf",(double)(timespec_to_ns(&t1)-timespec_to_ns(&t2))/1000000000,val);
+				fclose(fp);
+			}
+			usleep(100000);	
 		}
 		else{
 		 	 printf("Error during the read from the sensors\n");
