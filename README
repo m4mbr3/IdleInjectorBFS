@@ -1,6 +1,5 @@
 # Implement an adaptation mechanism based on idle cycles injection within the BFS scheduler to control the temperature of cores while executing applications
 
-  * be in two people
   * know how to code in C and hack Makefiles
   * know how to patch and compile the Linux kernel
   * more than one project of this type can be assigned using different base schedulers (e.g., BFS)

@@ -28,6 +28,12 @@
  *              a whole lot of those previous things.
  */
 
+/*
+ *  BFS Idle Injector BFSII
+ * 
+ *  now        Andrea Mambretti <andrea2.mambretti@mail.polimi.it>
+ */
+
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/nmi.h>

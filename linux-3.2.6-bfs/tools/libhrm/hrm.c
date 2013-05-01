@@ -1,3 +1,13 @@
+/* Heart Rate Monitor  (HRM)
+ *
+ *
+ * Designed and Implemented by:
+ * 
+ *      Davide Basilio Bartolini  <bartolini@elet.polimi.it>
+ *      Filippo Sironi            <sironi@csail.mit.edu>
+ *
+ *
+ */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>

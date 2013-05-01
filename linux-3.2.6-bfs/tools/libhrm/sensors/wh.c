@@ -1,3 +1,8 @@
+/*
+ * BFS Idle Injector
+ *
+ * Andrea Mambretti <andrea2.mambretti@mail.polimi.it>
+ */
 #include<stdio.h>
 #include<stdlib.h>
 

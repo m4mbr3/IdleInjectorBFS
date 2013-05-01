@@ -19,6 +19,12 @@
     MA 02110-1301 USA.
 */
 
+
+/* * BFS Idle Injector
+ *
+ * 	2013 Andrea Mambretti <andrea2.mambretti@mail.polimi.it>
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <getopt.h>

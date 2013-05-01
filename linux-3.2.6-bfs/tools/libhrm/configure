@@ -1,5 +1,16 @@
 #!/bin/bash
 
+#  Heart Rate Monitor  (HRM)
+# 
+# 
+#  Designed and Implemented by:
+#  
+#      Davide Basilio Bartolini  <bartolini@elet.polimi.it>
+#      Filippo Sironi            <sironi@csail.mit.edu>
+# 
+#
+#
+
 HDR_DIR=/usr/include/linux
 HRM_H=hrm.h
 CONFIG_HRM_MAX_WINDOW_SIZE=CONFIG_HRM_MAX_WINDOW_SIZE
